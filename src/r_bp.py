@@ -24,3 +24,5 @@ def R_BP_density(x, x_grid, rho, p0_grid, P0_grid):
         P = (1 - alpha) * P + alpha * H_rho
 
     return p, P
+
+#Check the git push
