@@ -2,7 +2,7 @@ import numpy as np
 from scipy.stats import norm
 from scipy.optimize import brentq
 
-from src.copula import gaussian_copula_density, gaussian_copula_cdf, gaussian_conditional_cdf
+from src.copula import gaussian_copula_density, gaussian_copula_cdf, gaussian_conditional_copula_cdf
 from src.r_bp import R_BP_density
 
 # Sampling from the estimated CDF
@@ -30,7 +30,7 @@ def R_BP_sample(x, x_grid, rho, n, P0_grid, P0_inv, seed=None):
 
         alpha = 1 / (i + 2)
         v_i = np.interp(x[i], x_grid, P)
-        H_rho = gaussian_conditional_cdf(P, v_i, rho)
+        H_rho = gaussian_conditional_copula_cdf(P, v_i, rho)
 
         P = (1 - alpha) * P + alpha * H_rho
 
@@ -52,7 +52,7 @@ def R_BP_sample(x, x_grid, rho, n, P0_grid, P0_inv, seed=None):
 
             def eq(U_prev):
 
-                f = ((1 - alpha) * U_prev + alpha * gaussian_conditional_cdf(U_prev, v_i, rho) - U)
+                f = ((1 - alpha) * U_prev + alpha * gaussian_conditional_copula_cdf(U_prev, v_i, rho) - U)
                 
                 return f
 
