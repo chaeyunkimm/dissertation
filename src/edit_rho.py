@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from scipy.optimize import minimize
 
 
 def normal_cdf(z):
@@ -100,3 +101,61 @@ def estimate_rho_adam_edit(n, p0_grid, P0_grid, lr=0.05, n_iter=300):
     rho_hat = rho_list[-1]
     
     return rho_hat, np.array(rho_list), np.array(loss_list)
+
+
+def np_sigmoid(x):
+    return 1/(1+np.exp(-x))
+
+def neg_log_like(theta, n, p0, P0):
+    '''
+    Calculates the negative log likelihood for an R-BP given observed values
+    and a prior distribution.
+
+    These observed values must be passed as their probability density 
+    under the prior distribution. (PDF and CDF)
+
+    '''
+
+    p = torch.from_numpy(p0)
+    P = torch.from_numpy(P0)
+
+    rho = 0.999 * torch.sigmoid(torch.from_numpy(theta))
+
+    p, _ = R_BP_torch_edit(n=n, rho=rho, p0_grid=p, P0_grid=P)
+    p_x = torch.clip(p, 1e-12, None).numpy() 
+
+    return float(np.sum(-np.log(p_x))) #Faster than torch for some reason...
+
+# It is good to note here that speeding up operations over gpu may well need 
+# different solutions. However, there are libraries to implement scipy on GPUs
+# See Jax!
+
+
+def estimate_rho_optim(n, p0, P0, max_iter=100, rho_0 = 0.6):
+    '''
+    Estimates the shape parameter rho in the R-BP algorithm via
+    minimising the negative log-likelihood for a set observed values.
+
+    These observed values must be passed as their probability density 
+    under the prior distribution. (PDF and CDF)
+
+    --------------------------------------------------------------------
+
+    n: int ; the number of observed values in the prior grid
+    p0: float array ; the prior PDF evaluated at the observed values
+    P0: float array ; the prior CDF evaluated at the observed values
+
+    max_iter: int ; the maximum number of iterations to run .minimize for.
+    rho_0: float ; the initial guess for rho. Must be in (0, 1).
+
+    '''
+    p0 = np.asarray(p0, dtype=np.float64)
+    P0 = np.asarray(P0, dtype=np.float64)
+    theta = minimize(
+        neg_log_like,
+        x0=np.log(rho_0 / (1.0 - rho_0)),
+        args=(n, p0, P0),
+        method="BFGS",
+        options={"maxiter": max_iter},
+    ).x[0]
+    return float(0.999 * np_sigmoid(theta))
