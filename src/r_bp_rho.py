@@ -81,4 +81,14 @@ def R_BP_coefs(rho, p0_obs, P0_obs):
 
     return U
 
-# For fixed rho, what can we do to speed up the evaluation of the 
+# For going from raw data to marginal distributions, use R-BP_density_U to evaluate these:
+from src.edit_rho import estimate_rho_optim
+def fit_r_BP_marginals(p0_obs, P0_obs):
+    n, d = p0.shape
+    rhos = np.zeros(d)
+    Us = np.zeros_like(p0_obs)
+    for i in range(d):
+        rhos[i] = estimate_rho_optim(n, p0_obs, P0_obs)
+        Us[:, i] = R_BP_coefs(rhos[i], p0_obs, P0_obs)
+    return rhos, Us
+

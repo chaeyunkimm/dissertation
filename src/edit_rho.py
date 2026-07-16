@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 from scipy.optimize import minimize
+from scipy.stats import gaussian_kde
+from scipy.special import ndtr
 
 
 def normal_cdf(z):
@@ -159,3 +161,15 @@ def estimate_rho_optim(n, p0, P0, max_iter=100, rho_0 = 0.6):
         options={"maxiter": max_iter},
     ).x[0]
     return float(0.999 * np_sigmoid(theta))
+
+def estimate_mvrho_optim(data, rho_0 = 0.6):
+    kde = gaussian_kde(data)
+    p0 = kde(data)
+    P0 = np.mean(ndtr((data - kde.dataset.T) / kde.factor), axis=0)
+    d = data.shape[1]
+    n = data.shape[0]
+    rhos = np.zeros(d)
+    for i in range(d):
+        rhos[i] = estimate_rho_optim(n, p0, P0, rho_0=rho_0)
+    return rhos
+
