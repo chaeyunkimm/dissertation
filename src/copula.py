@@ -55,29 +55,6 @@ def gaussian_conditional_cdf(u, v, rho):
 #    Vine Copula    #
 #####################
 
-def add_leaf(x_mat, leaf_idx=1):
-
-    xd = x_mat.shape[0]
-    yd = xd+1
-    y_mat = np.zeros((yd,yd), dtype = int)
-    for t in range(xd-1):
-        for e in range(xd-t-1):
-            y_mat[yd-1-e,e] = x_mat[xd-1-e,e]
-            y_mat[t,e] = x_mat[t,e]
-            if t>0:
-                y_mat[t-1, e] = x_mat[t-1, e]
-                #y_mat[yd-1-e,e] = yd
-    
-    y_mat[1,xd-1] = leaf_idx
-    y_mat[0,xd-1] = yd
-    #y_mat[yd-1-(xd-2), xd-2] = yd
-    y_mat[2,1] = 3
-    y_mat[0,1] = 2
-    y_mat[1,1] = 4
-    #y_mat[]
-
-    return y_mat
-
 def expand_mat(mat):
     n = mat.shape[0]
     u = np.zeros(n, dtype=int)
@@ -98,7 +75,7 @@ def show_bvcops_frommat(mat):
             else:
                 print(t,e, "(",mat[d-1-e, e],",",mat[t,e],")")
 
-def add_leaf2(mat, leafidx = 1):
+def add_leaf(mat, leafidx = 1):
     '''
     x_mat: 2D numpy array to be expanded
     leaf_idx: int, the index which the leaf should be attached to.
