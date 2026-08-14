@@ -1,82 +1,260 @@
 import numpy as np
 from scipy.stats import norm, multivariate_normal
-from scipy.stats import gaussian_kde
-from .copula import gaussian_copula_density, gaussian_copula_cdf, gaussian_conditional_copula_cdf
-from .data_generators import generate_x_grid
+from scipy.optimize import minimize
+import torch
+
+def gaussian_copula_density(u, v, rho):
+
+    # u, v in [ 10^{-6}, 1-10^{-6} ]
+    u = np.clip(u, 1e-6, 1 - 1e-6)
+    v = np.clip(v, 1e-6, 1 - 1e-6)
+
+    z_u = norm.ppf(u)
+    z_v = norm.ppf(v)
+
+    numerator = np.exp( - (rho**2 * (z_u**2 + z_v**2) - 2 * rho * z_u * z_v) / (2 * (1 - rho**2)))
+    denominator = np.sqrt(1 - rho**2)
+
+    return numerator / denominator
+
+def gaussian_copula_density_torch(u, v, rho):
+    eps = 1e-6
+
+    u = torch.clamp(u, eps, 1 - eps)
+    v = torch.clamp(v, eps, 1 - eps)
+
+    z_u = normal_ppf(u)
+    z_v = normal_ppf(v)
+
+    numerator = torch.exp(
+        - (rho**2 * (z_u**2 + z_v**2) - 2 * rho * z_u * z_v)
+        / (2 * (1 - rho**2))
+    )
+
+    denominator = torch.sqrt(1 - rho**2)
+
+    return numerator / denominator
 
 
-# kernel density esitmation
-def kde_initial(x, x_grid):
+def gaussian_conditional_cdf_torch(u, v, rho):
+    eps = 1e-6
 
-    kde = gaussian_kde(x)
+    u = torch.clamp(u, eps, 1 - eps)
+    v = torch.clamp(v, eps, 1 - eps)
 
-    p0_grid = kde(x_grid)
+    z_u = normal_ppf(u)
+    z_v = normal_ppf(v)
 
-    dx = x_grid[1] - x_grid[0]
+    return normal_cdf((z_u - rho * z_v) / torch.sqrt(1 - rho**2))
 
-    P0_grid = np.cumsum(p0_grid) * dx
-    P0_grid = P0_grid / P0_grid[-1]
+def gaussian_conditional_cdf(u, v, rho):
 
-    return p0_grid, P0_grid
+    u = np.clip(u, 1e-6, 1 - 1e-6)
+    v = np.clip(v, 1e-6, 1 - 1e-6)
 
-# R-BP
-def R_BP_density(x, x_grid, rho, p0_grid, P0_grid):
-    # p_0, P_0
-    p = p0_grid.copy()
-    P = P0_grid.copy()
+    z_u = norm.ppf(u)
+    z_v = norm.ppf(v)
 
-    # update
-    for i in range(len(x)):
+    return norm.cdf((z_u - rho * z_v) / np.sqrt(1 - rho**2))
 
-        # weight
+def normal_cdf(z):
+    return 0.5 * (1.0 + torch.erf(z / torch.sqrt(torch.tensor(2.0, dtype=z.dtype))))
+
+
+def normal_ppf(u):
+    normal = torch.distributions.Normal(0.0, 1.0)
+    return normal.icdf(u)
+
+
+def R_BP_torch_edit(n, rho, p0_grid, P0_grid):
+    p = p0_grid 
+    P = P0_grid 
+
+    for i in range(n):
         alpha = 1 / (i + 2)
 
-        u = P
-        u_i = np.interp(x[i], x_grid, P)
+        u = P # P_{i-1}(x_grid) : grid 전체에 대한 cdf값들 
+        u_i = P[i] #P_{i-1}(x_n)
 
-        c_rho = gaussian_copula_density(u, u_i, rho)
-        H_rho = gaussian_conditional_copula_cdf(u, u_i, rho)
+        c_rho = gaussian_copula_density_torch(u, u_i, rho)
+        H_rho = gaussian_conditional_cdf_torch(u, u_i, rho)
 
         p = p * ((1 - alpha) + alpha * c_rho)
         P = (1 - alpha) * P + alpha * H_rho
 
     return p, P
 
-def fit_R_BP_marginals_until_t(X_train, rho_grid=None):
 
-    from .rho_estimation import estimate_rho_grid
+# R-BP
+def R_BP_density(n, rho, p0_grid, P0_grid, U = None):
+    # p_0, P_0
+    p = p0_grid
+    P = P0_grid
+    if U is None:
+        # update
+        for i in range(n):
+            # weight
+            alpha = 1 / (i + 2)
+
+            u = P # P_{i-1}(x_grid) 
+            u_i = P[i] #P_{i-1}(x_n)
+
+            c_rho = gaussian_copula_density(u, u_i, rho)
+            H_rho = gaussian_conditional_cdf(u, u_i, rho)
+
+            p = p * ((1 - alpha) + alpha * c_rho)
+            P = (1 - alpha) * P + alpha * H_rho
+
+        return p, P
+    else:
+        for i in range(len(U)):
+
+            # weight
+            alpha = 1 / (i + 2)
+
+            u = P # P_{i-1}(x_grid) 
+            u_i = U[i] #P_{i-1}(x_i)
+
+            c_rho = gaussian_copula_density(u, u_i, rho)
+            H_rho = gaussian_conditional_cdf(u, u_i, rho)
+
+            p = p * ((1 - alpha) + alpha * c_rho)
+            P = (1 - alpha) * P + alpha * H_rho
+
+        return p, P
     
-    d = X_train.shape[1]
+def R_BP_density_U(rho, p0, P0, U):
+    p = p0
+    P = P0
+    for i, ui in enumerate(U):
 
-    x_grids = []
-    p0_grids = []
-    P0_grids = []
+            # weight
+            alpha = 1 / (i + 2)
 
-    rho_hats = []
-    p_grids = []
-    P_grids = []
+            u = P # P_{i-1}(x_grid) 
+            u_i = ui #P_{i-1}(x_i)
 
-    if rho_grid is None:
-        rho_grid = np.linspace(0.01, 0.99, 50)
+            c_rho = gaussian_copula_density(u, u_i, rho)
+            H_rho = gaussian_conditional_cdf(u, u_i, rho)
 
-    for j in range(d):
+            p = p * ((1 - alpha) + alpha * c_rho)
+            P = (1 - alpha) * P + alpha * H_rho
 
-        x_j = X_train[:, j]
+    return p, P
 
-        x_grid_j = generate_x_grid(x_j)
+def R_BP_coefs(rho, p0_obs, P0_obs):
+    p = p0_obs
+    P = P0_obs
+    n = len(p0_obs)
+    U = np.zeros(n)
+    for i in range(n):
 
-        p0_grid_j, P0_grid_j = kde_initial(x_j, x_grid_j)
+        # weight
+        alpha = 1 / (i + 2)
 
-        rho_hat_j, log_lik_j = estimate_rho_grid(x=x_j, x_grid=x_grid_j, p0_grid=p0_grid_j, P0_grid=P0_grid_j, rho_grid=rho_grid)
+        u = P # P_{i-1}(x_grid) 
+        U[i] = P[i] #P_{i-1}(x_n)
+        
 
-        p_est_j, P_est_j = R_BP_density( x=x_j, x_grid=x_grid_j, rho=rho_hat_j, p0_grid=p0_grid_j, P0_grid=P0_grid_j)
+        c_rho = gaussian_copula_density(u, U[i], rho)
+        H_rho = gaussian_conditional_cdf(u, U[i], rho)
 
-        x_grids.append(x_grid_j)
-        p0_grids.append(p0_grid_j)
-        P0_grids.append(P0_grid_j)
+        p = p * ((1 - alpha) + alpha * c_rho)
+        P = (1 - alpha) * P + alpha * H_rho
 
-        rho_hats.append(rho_hat_j)
-        p_grids.append(p_est_j)
-        P_grids.append(P_est_j)
+    return U
 
-    return x_grids, p0_grids, P0_grids, rho_hats, p_grids, P_grids
+def R_BP_coefs_torch(rho, p0_obs, P0_obs):
+    p = p0_obs
+    P = P0_obs
+    n = len(p0_obs)
+    U = torch.zeros(n)
+    for i in range(n):
+
+        # weight
+        alpha = 1 / (i + 2)
+
+        u = P # P_{i-1}(x_grid) 
+        U[i] = P[i] #P_{i-1}(x_n)
+        
+
+        c_rho = gaussian_copula_density_torch(u, U[i], rho)
+        H_rho = gaussian_conditional_cdf_torch(u, U[i], rho)
+
+        p = p * ((1 - alpha) + alpha * c_rho)
+        P = (1 - alpha) * P + alpha * H_rho
+
+    return U
+
+def np_sigmoid(x):
+    return 1/(1+np.exp(-x))
+
+def neg_log_like(theta, n, p0, P0):
+    '''
+    Calculates the negative log likelihood for an R-BP given observed values
+    and a prior distribution.
+
+    These observed values must be passed as their probability density 
+    under the prior distribution. (PDF and CDF)
+
+    Faster using torch for calculations
+    '''
+
+    p = torch.from_numpy(p0)
+    P = torch.from_numpy(P0)
+
+    rho = 0.999 * torch.sigmoid(torch.from_numpy(theta))
+
+    p, _ = R_BP_torch_edit(n=n, rho=rho, p0_grid=p, P0_grid=P)
+    p_x = torch.clip(p, 1e-12, None).numpy() 
+
+    return float(np.sum(-np.log(p_x))) #Faster than using torch
+
+
+
+def estimate_rho_optim(n, p0, P0, max_iter=100, rho_0 = 0.6):
+    '''
+    Estimates the shape parameter rho in the R-BP algorithm via
+    minimising the negative log-likelihood for a set observed values.
+
+    These observed values must be passed as their probability density 
+    under the prior distribution. (PDF and CDF)
+    --------------------------------------------------------------------
+    n: int ; the number of observed values in the prior grid
+    p0: float array ; the prior PDF evaluated at the observed values
+    P0: float array ; the prior CDF evaluated at the observed values
+
+    max_iter: int ; the maximum number of iterations to run .minimize for.
+    rho_0: float ; the initial guess for rho. Must be in (0, 1).
+
+    '''
+    p0 = np.asarray(p0, dtype=np.float64)
+    P0 = np.asarray(P0, dtype=np.float64)
+    theta = minimize(
+        neg_log_like,
+        x0=np.log(rho_0 / (1.0 - rho_0)),
+        args=(n, p0, P0),
+        method="BFGS",
+        options={"maxiter": max_iter},
+    ).x[0]
+    return float(0.999 * np_sigmoid(theta))
+
+def fit_R_BP_marginals(p0_obs, P0_obs):
+    n, d = p0_obs.shape
+    rhos = np.zeros(d)
+    Us = np.zeros((n,d))
+    for i in range(d):
+        rhos[i] = estimate_rho_optim(n, p0_obs[:,i], P0_obs[:,i])
+        Us[:, i] = R_BP_coefs(rhos[i], p0_obs[:,i], P0_obs[:,i])
+    return rhos, Us
+
+def fit_R_BP_marginals_torch(p0_obs, P0_obs):
+    n, d = p0_obs.shape
+    p = torch.from_numpy(p0_obs)
+    P = torch.from_numpy(P0_obs)
+    rhos = torch.zeros(d)
+    Us = torch.zeros((n,d))
+    for i in range(d):
+        rhos[i] = estimate_rho_optim(n, p0_obs[:,i], P0_obs[:,i])
+        Us[:, i] = R_BP_coefs_torch(rhos[i], p[:,i], P[:,i])
+    return rhos, Us

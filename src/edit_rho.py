@@ -1,5 +1,8 @@
 import numpy as np
 import torch
+from scipy.optimize import minimize
+from scipy.stats import gaussian_kde
+from scipy.special import ndtr
 
 
 def normal_cdf(z):
@@ -40,78 +43,6 @@ def gaussian_conditional_cdf_torch(u, v, rho):
     z_v = normal_ppf(v)
 
     return normal_cdf((z_u - rho * z_v) / torch.sqrt(1 - rho**2))
-
-
-def interp_fixed_x_torch(x_values, x_grid, y_grid):
-    idx = torch.searchsorted(x_grid, x_values) - 1
-    idx = torch.clamp(idx, 0, len(x_grid) - 2)
-
-    x_left = x_grid[idx]
-    x_right = x_grid[idx + 1]
-
-    y_left = y_grid[idx]
-    y_right = y_grid[idx + 1]
-
-    weight = (x_values - x_left) / (x_right - x_left)
-
-    return (1 - weight) * y_left + weight * y_right
-
-
-def R_BP_density_torch(x, x_grid, rho, p0_grid, P0_grid):
-    p = p0_grid.clone()
-    P = P0_grid.clone()
-
-    for i in range(len(x)):
-        alpha = 1 / (i + 2)
-
-        u = P
-        u_i = interp_fixed_x_torch(x[i:i+1], x_grid, P)[0]
-
-        c_rho = gaussian_copula_density_torch(u, u_i, rho)
-        H_rho = gaussian_conditional_cdf_torch(u, u_i, rho)
-
-        p = p * ((1 - alpha) + alpha * c_rho)
-        P = (1 - alpha) * P + alpha * H_rho
-
-    return p, P
-
-
-def estimate_rho_adam(x, x_grid, p0_grid, P0_grid, lr=0.05, n_iter=300):
-    x_torch = torch.tensor(x, dtype=torch.float64)
-    x_grid_torch = torch.tensor(x_grid, dtype=torch.float64)
-    p0_grid_torch = torch.tensor(p0_grid, dtype=torch.float64)
-    P0_grid_torch = torch.tensor(P0_grid, dtype=torch.float64)
-
-    theta = torch.tensor(0.0, dtype=torch.float64, requires_grad=True)
-
-    optimizer = torch.optim.Adam([theta], lr=lr)
-
-    loss_list = []
-    rho_list = []
-
-    for _ in range(n_iter):
-        optimizer.zero_grad()
-
-        rho = 0.99 * torch.sigmoid(theta)
-
-        p_est, P_est = R_BP_density_torch(x=x_torch, x_grid=x_grid_torch, rho=rho, p0_grid=p0_grid_torch, P0_grid=P0_grid_torch)
-
-        p_x = interp_fixed_x_torch(x_torch, x_grid_torch, p_est)
-        p_x = torch.clamp(p_x, 1e-12, None)
-
-        log_lik = torch.sum(torch.log(p_x))
-
-        loss = -log_lik
-
-        loss.backward()
-        optimizer.step()
-
-        loss_list.append(loss.item())
-        rho_list.append(rho.item())
-
-    rho_hat = rho_list[-1]
-
-    return rho_hat, np.array(rho_list), np.array(loss_list)
 
 # Potential edits: these will compute the p(x_n) explicitly. 
 # For large n it may become infeasable, but this should run fast on a gpu until memory runs out!
@@ -172,3 +103,73 @@ def estimate_rho_adam_edit(n, p0_grid, P0_grid, lr=0.05, n_iter=300):
     rho_hat = rho_list[-1]
     
     return rho_hat, np.array(rho_list), np.array(loss_list)
+
+
+def np_sigmoid(x):
+    return 1/(1+np.exp(-x))
+
+def neg_log_like(theta, n, p0, P0):
+    '''
+    Calculates the negative log likelihood for an R-BP given observed values
+    and a prior distribution.
+
+    These observed values must be passed as their probability density 
+    under the prior distribution. (PDF and CDF)
+
+    '''
+
+    p = torch.from_numpy(p0)
+    P = torch.from_numpy(P0)
+
+    rho = 0.999 * torch.sigmoid(torch.from_numpy(theta))
+
+    p, _ = R_BP_torch_edit(n=n, rho=rho, p0_grid=p, P0_grid=P)
+    p_x = torch.clip(p, 1e-12, None).numpy() 
+
+    return float(np.sum(-np.log(p_x))) #Faster than torch for some reason...
+
+# It is good to note here that speeding up operations over gpu may well need 
+# different solutions. However, there are libraries to implement scipy on GPUs
+# See Jax!
+
+
+def estimate_rho_optim(n, p0, P0, max_iter=100, rho_0 = 0.6):
+    '''
+    Estimates the shape parameter rho in the R-BP algorithm via
+    minimising the negative log-likelihood for a set observed values.
+
+    These observed values must be passed as their probability density 
+    under the prior distribution. (PDF and CDF)
+
+    --------------------------------------------------------------------
+
+    n: int ; the number of observed values in the prior grid
+    p0: float array ; the prior PDF evaluated at the observed values
+    P0: float array ; the prior CDF evaluated at the observed values
+
+    max_iter: int ; the maximum number of iterations to run .minimize for.
+    rho_0: float ; the initial guess for rho. Must be in (0, 1).
+
+    '''
+    p0 = np.asarray(p0, dtype=np.float64)
+    P0 = np.asarray(P0, dtype=np.float64)
+    theta = minimize(
+        neg_log_like,
+        x0=np.log(rho_0 / (1.0 - rho_0)),
+        args=(n, p0, P0),
+        method="BFGS",
+        options={"maxiter": max_iter},
+    ).x[0]
+    return float(0.999 * np_sigmoid(theta))
+
+def estimate_mvrho_optim(data, rho_0 = 0.6):
+    kde = gaussian_kde(data)
+    p0 = kde(data)
+    P0 = np.mean(ndtr((data - kde.dataset.T) / kde.factor), axis=0)
+    d = data.shape[1]
+    n = data.shape[0]
+    rhos = np.zeros(d)
+    for i in range(d):
+        rhos[i] = estimate_rho_optim(n, p0, P0, rho_0=rho_0)
+    return rhos
+
