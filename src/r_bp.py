@@ -3,7 +3,7 @@ from scipy.stats import norm, multivariate_normal
 from scipy.stats import gaussian_kde
 from .copula import gaussian_copula_density, gaussian_copula_cdf, gaussian_conditional_copula_cdf
 from .data_generators import generate_x_grid
-from .rho_estimation import estimate_rho_grid
+
 
 # kernel density esitmation
 def kde_initial(x, x_grid):
@@ -44,6 +44,8 @@ def R_BP_density(x, x_grid, rho, p0_grid, P0_grid):
 
 def fit_R_BP_marginals_until_t(X_train, rho_grid=None):
 
+    from .rho_estimation import estimate_rho_grid
+    
     d = X_train.shape[1]
 
     x_grids = []
