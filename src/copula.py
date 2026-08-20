@@ -1,11 +1,12 @@
 import numpy as np
-from scipy.stats import norm, multivariate_normal
 import pyvinecopulib as pv
-from scipy.optimize import minimize
-from scipy.special import expit
 import torch
 import math
 
+from scipy.stats import norm, multivariate_normal
+from itertools import chain
+from scipy.optimize import minimize
+from scipy.special import expit
 
 #####################
 #  Gaussian Copula  #
@@ -491,6 +492,26 @@ class conditional_vine_copula:
                 density *= self.trees_np[i]['pair_copula'].pdf(h_evals[h_points][i].T)
 
         return density
+
+    def cdf_implicit(self, data):
+        '''
+        Currently implementing the implicit conditional copula in one dimension. This is implicit as we can simply evaluate
+        the last h function of the tree structure as the h functions are conditional cdfs by construction.
+        '''
+        if len(self.ed_set) == 1:
+            h_evals, h_points = self.__eval_h_functions(data)
+            print(self.trees_np[-1]["conditioned"])
+            if self.trees_np[-1]["conditioned"][0] == self.ed_set:
+                return h_evals[-1][1]
+            elif self.trees_np[-1]["conditioned"][1] == self.ed_set:
+                return h_evals[-1][0]
+            else:
+                raise ValueError("The conditioned set implied from the given conditioning set and the vine copula"
+                " is not in the last copula. The vine is not set up correctly.")
+
+        else:
+            raise NotImplementedError("Not implemented as 2 dimensions requires further structure, and >2D there is no currently known implicit form")
+
     
     def cdf_numerical(self, data, n_points = 6):
         '''
@@ -551,7 +572,7 @@ class conditional_vine_copula:
             samples = self.vine.simulate(n_samples)
             p = np.mean(np.all(np.less(samples, data[:, None, :]), axis=2), axis = 1)
             return p
-import pyvinecopulib as pv
+
 
 def fit_conditional_vines(U_condition, U_target):
     
