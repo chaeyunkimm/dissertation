@@ -1,8 +1,12 @@
 import numpy as np
-from scipy.stats import norm, multivariate_normal, gaussian_kde
-from scipy.optimize import minimize
-from scipy.special import ndtr
 import torch
+import matplotlib.pyplot as plt
+
+
+from scipy.stats import norm, multivariate_normal, gaussian_kde
+from scipy.optimize import minimize, brentq
+from scipy.special import ndtr
+
 
 def gaussian_copula_density(u, v, rho):
 
@@ -224,6 +228,110 @@ def fit_R_BP_marginals(p0_obs, P0_obs):
         rhos[i] = estimate_rho_optim(n, p0_obs[:,i], P0_obs[:,i])
         Us[:, i] = R_BP_coefs(rhos[i], p0_obs[:,i], P0_obs[:,i])
     return rhos, Us
+
+def invert_rbp_cdf(data:np.ndarray, rhos:np.ndarray, Us:np.ndarray, P0_inv:function)->np.ndarray:
+    '''
+    Go from an evaluation of the RBP CDF back to a value in X.
+
+    Parameters:
+    -----------
+    data : Evaluations to be inverted
+    rhos : Bandwidth parameter
+    Us : Trained intermediary RBP CDF evaluations
+    '''
+    n = Us.shape[0]
+    d = Us.shape[1]
+
+    def eq(U_prev, alpha, v, U):
+        def f(U_prev):
+            return ((1 - alpha) * U_prev + alpha * gaussian_conditional_cdf(U_prev, v, rho) - U)
+        return f
+
+    for j in range(d):
+        rho = rhos[j]
+        current_U = data[j]
+
+        # backward recursion
+        for i in reversed(range(n)):
+
+            alpha = 1/(i+2)
+
+            func = eq(U_prev, alpha, Us[i], current_U)
+
+            # finding root : f(U_pre) = 0 
+            U_prev = brentq(eq, 1e-10, 1 - 1e-10)
+
+            current_U = U_prev
+
+        # Y = P_0^{-1}(U_0)
+        y = P0_inv(current_U)
+    return 0
+
+
+class rbp_process:
+    def __init__(self):
+        pass
+
+    def fit(self, prior_p_data:np.ndarray, prior_c_data:np.ndarray):
+        self.prior_p_data, self.prior_c_data = prior_p_data, prior_c_data
+        self.rhos, self.pivots = fit_R_BP_marginals(prior_p_data, prior_c_data)
+
+    def update_fit(self, new_p_data, new_c_data):
+        self.prior_p_data = np.concatenate((self.prior_p_data, new_p_data))
+        self.prior_c_data = np.concatenate((self.prior_c_data, new_c_data))
+        self.rhos, self.pivots = fit_R_BP_marginals(self.prior_p_data, self.prior_c_data)
+
+    def pdf(self, p_data, c_data):
+        p, _ = R_BP_density_U(self.rhos, p_data, c_data, self.pivots)
+        return p
+
+    def cdf(self, p_data, c_data):
+        _, c = R_BP_density_U(self.rhos, p_data, c_data, self.pivots)
+        return c
+
+    def eval(self, p_data, c_data):
+        return R_BP_density_U(self.rhos, p_data, c_data, self.pivots)
+
+    def plot_real_line_pdfs(self, x_grid=None, n_points=500):
+        """
+        Inspect the fitted RBP marginal densities on the unit interval [0, 1].
+
+        Parameters
+        ----------
+        x_grid : np.ndarray, optional
+            Grid over [0, 1]. If not provided, a uniform grid is created.
+        n_points : int
+            Number of points if x_grid is not supplied.
+        """
+        if not hasattr(self, 'rhos') or not hasattr(self, 'pivots'):
+            raise ValueError("The RBP process has not been fitted yet.")
+
+        if x_grid is None:
+            x_grid = np.linspace(0, 1, n_points)
+        x_grid = np.asarray(x_grid, dtype=float)
+        if x_grid.ndim != 1:
+            raise ValueError("x_grid must be a 1D array of points in [0, 1].")
+        if np.any((x_grid < 0) | (x_grid > 1)):
+            raise ValueError("x_grid must lie within [0, 1].")
+
+        d = self.prior_p_data.shape[1]
+        fig, axes = plt.subplots(1, d, figsize=(4 * d, 4), squeeze=False)
+
+        for j in range(d):
+            prior_p = np.ones_like(x_grid)
+            prior_c = x_grid.copy()
+            rbp_p, _ = R_BP_density_U(self.rhos[j], prior_p, prior_c, self.pivots[:, j])
+
+            axes[0, j].plot(x_grid, rbp_p, linewidth=2, label='RBP PDF')
+            axes[0, j].set_title(f'Marginal {j + 1}')
+            axes[0, j].set_xlabel('u')
+            axes[0, j].set_ylabel('density')
+            axes[0, j].legend()
+            axes[0, j].grid(True, alpha=0.3)
+
+        fig.tight_layout()
+        plt.show()
+
 
 
 

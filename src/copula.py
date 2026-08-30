@@ -136,7 +136,6 @@ def get_copulas_fm(mat, t=None, e = None):
         jump += d-1-t
     return cops
 
-
 def set_matrix_fc(cops):
     d = cops.shape[1]
     n = int(d*(d-1)/2)
@@ -303,7 +302,6 @@ def add_leaf_copulas_variations(cops, leafidx = 1):
 
     return variations
 
-
 def add_leaf_to_mat(mat, leafidx = 1):
     cops = get_copulas_fm(mat)
     zcops = add_leaf_copulas(cops, leafidx)
@@ -368,20 +366,32 @@ class conditional_vine_copula:
 
     Can calculate the pdf of a conditional vine copula when passed a pv.Vinecop object constructed with a conditional set.
     '''
-    def __init__(self, conditioning_set, vine:pv.Vinecop):
+    def __init__(self, conditioning_set, vine:pv.Vinecop = None):
         if len(conditioning_set) == 1:
             print("WARNING: This wil not produce the true conditional pdf, you must not multiply by the marginal of the conditioning variable")
         if len(conditioning_set) == 2:
             print("WARNING: If the copula of the conditioning is not contained in the Vine, this will not give the correct value.")
-        
-        self.vine = vine
-        self.trees_np = np.fromiter(chain.from_iterable(vine.get_trees()), dtype=object)
 
-        self.subtree_mask = self.__find_subtree_mask(conditioning_set)
+        if vine is not None:
+            self.vine = vine
+            self.trees_np = np.fromiter(chain.from_iterable(vine.get_trees()), dtype=object)
+
+            self.subtree_mask = self.__find_subtree_mask(conditioning_set)
+            self.subtrees_np = self.trees_np[self.subtree_mask]
+            self.ed_set = np.setdiff1d(vine.order, conditioning_set)
+
         self.conditioning_set = np.array(conditioning_set)
-        self.ed_set = np.setdiff1d(vine.order, conditioning_set)
-        print(self.ed_set)
+
+    def fit_from_data(self, data, controls = pv.FitControlsVinecop(), check_vine = False):
+        controls.conditioning_set = self.conditioning_set
+        self.vine = pv.Vinecop.from_data(data, controls=controls)
+        self.ed_set = np.setdiff1d(self.vine.order, self.conditioning_set)
+        self.trees_np = np.fromiter(chain.from_iterable(self.vine.get_trees()), dtype=object)
+        self.subtree_mask = self.__find_subtree_mask(self.conditioning_set)
         self.subtrees_np = self.trees_np[self.subtree_mask]
+        if check_vine:
+            print(self.vine)
+
 
     def __find_subtree_mask(self, conditioning_set:tuple)->np.array:
         '''
@@ -408,12 +418,13 @@ class conditional_vine_copula:
         '''
         return int(t*(dim+1-(t+1)/2))
 
-    def __eval_h_functions(self, u: np.array)-> tuple: #Should this be put into torch (we need gradients)?
+    def __eval_h_functions(self, u: np.array)-> tuple: 
         '''
         Evaluates all h functions required for the vine structure, therefore allowing conditional copulas to be evaluated
         from these values (From a structure containing the tree subset to condition on).
         '''
-        cops = self.trees_np #Indexing: [tree][edges][other]. Order of edges is not necessarily increasing in ['conditioning'][0].
+        cops = self.trees_np
+
         n = u.shape[0]
         d = u.shape[1]
         n_cs = len(cops)
@@ -436,50 +447,51 @@ class conditional_vine_copula:
         t=1
         #Go through trees > 1. This does not work with indexing!
         for j, cop in enumerate(cops[end_first_tree:]):
+            if end_first_tree+j>=self.__t_idx(t+1, d-1):
+                t+=1
+            point_start = self.__t_idx(t-1, d-1)
+            new_point_start = self.__t_idx(t, d-1)
+            old_eval_start = self.__t_idx(t, d)
+            #I want to find the h_eval required to compute the next one correctly according to the vine.
+            c1, c2 = cop['conditioned']
+            cing = cop['conditioning']
+            up1 = np.append(cing, c1)
+            up2 = np.append(cing, c2)
+            nup = t+1
+            #print(point_start)
+            count = 0
 
-                t += (j+self.__t_idx(t, d-1))//self.__t_idx(t+1, d-1)
-                point_start = self.__t_idx(t-1, d-1)
-                new_point_start = self.__t_idx(t, d-1)
-                old_eval_start = self.__t_idx(t, d)
-                #I want to find the h_eval required to compute the next one correctly according to the vine.
-                c1, c2 = cop['conditioned']
-                cing = cop['conditioning']
-                up1 = np.append(cing, c1)
-                up2 = np.append(cing, c2)
-                nup = t+1
+            #print(cop)
+            #Find the h_evals in the vine above corresponding to the current copula.
+            for k, upcop in enumerate(cops[point_start:new_point_start]):
+                allc = upcop['conditioned']+tuple(upcop['conditioning'])
 
-                count = 0
-                #Can I vectorise this - numpy?
-                #Find the h_evals in the vine above corresponding to the current copula.
-                for k, upcop in enumerate(cops[point_start:new_point_start]):
-                    allc = upcop['conditioned']+tuple(upcop['conditioning'])
+                if np.sum(np.isin(up1, allc))==nup: # Use np.all?
+                    idx1 = k
+                    count += 1
+                    if count == 2:
+                        break
+                elif np.sum(np.isin(up2, allc))==nup:
+                    idx2 = k
+                    count += 1
+                    if count == 2:
+                        break
+            #Which h-function should I use?
+            if cops[point_start+idx1]['conditioned'][0]==c1:
+                funcidx1 = 1
+            else:
+                funcidx1 = 0
+            if cops[point_start+idx2]['conditioned'][0]==c2:
+                funcidx2 = 1
+            else:
+                funcidx2 = 0
 
-                    if np.sum(np.isin(up1, allc))==nup: # Use np.all?
-                        idx1 = k
-                        count += 1
-                        if count == 2:
-                            break
-                    elif np.sum(np.isin(up2, allc))==nup:
-                        idx2 = k
-                        count += 1
-                        if count == 2:
-                            break
-                #Which h-function should I use?
-                if cops[point_start+idx1]['conditioned'][0]==c1:
-                    funcidx1 = 1
-                else:
-                    funcidx1 = 0
-                if cops[point_start+idx2]['conditioned'][0]==c2:
-                    funcidx2 = 1
-                else:
-                    funcidx2 = 0
+            mask = ((old_eval_start+ idx1, old_eval_start+ idx2),(funcidx1,funcidx2))# Points to correct h_evals
+            h_pointers[end_first_tree+j] = mask
 
-                mask = ((old_eval_start+ idx1, old_eval_start+ idx2),(funcidx1,funcidx2))# Points to correct h_evals
-                h_pointers[end_first_tree+j] = mask
-
-                #Assign h function evaluations # if statement has not fixed it.
-                h_evals[d+end_first_tree+j,0] = cop['pair_copula'].hfunc1(h_evals[mask].T)
-                h_evals[d+end_first_tree+j,1] = cop['pair_copula'].hfunc2(h_evals[mask].T)
+            #Assign h function evaluations # if statement has not fixed it.
+            h_evals[d+end_first_tree+j,0] = cop['pair_copula'].hfunc1(h_evals[mask].T)
+            h_evals[d+end_first_tree+j,1] = cop['pair_copula'].hfunc2(h_evals[mask].T)
 
         return h_evals, (h_pointers[:,0], h_pointers[:,1])
     
@@ -499,8 +511,8 @@ class conditional_vine_copula:
         the last h function of the tree structure as the h functions are conditional cdfs by construction.
         '''
         if len(self.ed_set) == 1:
-            h_evals, h_points = self.__eval_h_functions(data)
-            print(self.trees_np[-1]["conditioned"])
+            h_evals, _ = self.__eval_h_functions(data)
+
             if self.trees_np[-1]["conditioned"][0] == self.ed_set:
                 return h_evals[-1][1]
             elif self.trees_np[-1]["conditioned"][1] == self.ed_set:
@@ -512,7 +524,6 @@ class conditional_vine_copula:
         else:
             raise NotImplementedError("Not implemented as 2 dimensions requires further structure, and >2D there is no currently known implicit form")
 
-    
     def cdf_numerical(self, data, n_points = 6):
         '''
         Numerical integration over all conditioned variables. This is more complex than it seems and infeasable in high dimensions,
@@ -521,7 +532,7 @@ class conditional_vine_copula:
         
         ed_idxs = self.ed_set-1
         ing_idxs = self.conditioning_set-1
-        print(ing_idxs)
+
         if len(ing_idxs) == 0:
             print("try cdf_mc")
             raise NotImplementedError
@@ -572,6 +583,9 @@ class conditional_vine_copula:
             samples = self.vine.simulate(n_samples)
             p = np.mean(np.all(np.less(samples, data[:, None, :]), axis=2), axis = 1)
             return p
+
+    def inverse_transform():
+        pass
 
 
 def fit_conditional_vines(U_condition, U_target):
@@ -685,7 +699,8 @@ def gaussian_parameter(f_G_i):
     return R_i
 
 def gaussian_copula_log_density(z_i, R_i):
-    
+    # This doesn't make sense on first reading: I think it is correct, but log_det_R_i should be log_det_L_i (the square root matrix of R)
+    # The 2 times is also confusing when you are naming the variable in this way.
     eps = 1e-6
     identity = torch.eye(R_i.shape[0], dtype=R_i.dtype, device=R_i.device)
 
@@ -1115,7 +1130,7 @@ def compute_time_varying_copula_paths(u_tilde, estimated_parameters):
     theta_path = []
     log_c_mix_path = []
     
-    for i in range(u_tilde.shape[0]):
+    for i in range(u_tilde.shape[0]): # n u_tildes and therefore computes the next predicted across the trajectory
         
         R_i = gaussian_parameter(f_G_i)
         theta_i = clayton_parameter(f_C_i)
@@ -1150,7 +1165,7 @@ def compute_time_varying_copula_paths(u_tilde, estimated_parameters):
     theta_next = clayton_parameter(f_C_i)
 
     return {
-        "weight": torch.sigmoid(weight.detach()),
+        "weight": torch.sigmoid(weight.detach()), # What is going on with this weight - did we not just fit it and therfore don't want to change it?
         "R_path": R_path,
         "theta_path": theta_path,
         "log_c_mix_path": log_c_mix_path,
@@ -1181,3 +1196,68 @@ def fit_gaussian_clayton_mixture(u_tilde, epochs=300, learning_rate=0.0001):
             R_next,
             theta_next,
             weight)
+
+class time_varying_copula:
+    def __init__(self, mix_type = "GC"):
+        pass
+
+    def fit(self, c_data, printout = False):
+        if printout:
+            print("Starting fit")
+        self.params, _, self.R_next, self.theta_next, self.weight = fit_gaussian_clayton_mixture(c_data)
+        print(self.R_next)
+        if printout:
+            print("Fit completed")
+
+    def pdf(self, c_data:torch.tensor):
+        if type(c_data) != torch.tensor:
+            c_data = torch.as_tensor(c_data)
+        R_next = torch.as_tensor(self.R_next, dtype=torch.float64) # do we need these?
+        theta_next = torch.as_tensor(self.theta_next, dtype=torch.float64)
+        weight = torch.as_tensor(self.weight, dtype=torch.float64)
+    
+        if weight.numel() != 1:
+            raise ValueError("weight must be a scalar mixture probability.")
+    
+        weight = weight.reshape(())
+    
+        if not torch.isfinite(weight).item():
+            raise ValueError("weight must be finite.")
+    
+        if not 0.0 <= weight.item() <= 1.0:
+            raise ValueError(
+                f"weight must be between 0 and 1, but received {weight.item()}."
+            )
+    
+        # Gaussian copula
+        normal = torch.distributions.Normal(
+            c_data.new_tensor(0.0),
+            c_data.new_tensor(1.0)
+        )
+        z = normal.icdf(c_data)
+
+        log_c_G = gaussian_copula_log_density(z, R_next)
+        c_G = torch.exp(log_c_G)
+    
+        # Clayton copula
+        log_c_C = clayton_copula_log_density(
+            c_data,
+            theta_next
+        )
+        c_C = torch.exp(log_c_C)
+    
+        # Gaussian-Clayton mixture
+        c_mix = weight * c_G + (1.0 - weight) * c_C
+        return c_mix
+
+    def step_forward(self, c_datum):
+        if c_datum.shape[0] > 1:
+            raise ValueError("The function can only do one step at a time currently")
+
+        copula_results = compute_time_varying_copula_paths(c_datum, estimated_parameters=self.params)
+
+        self.R_next = copula_results["R_next"]
+        self.theta_next = copula_results["theta_next"]
+        self.weight = copula_results["weight"]
+
+

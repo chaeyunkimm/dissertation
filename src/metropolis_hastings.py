@@ -56,8 +56,9 @@ def adaptive_mh(logdensityfunc, x0, sigma, nmoves=5, return_entire_chain=False, 
 
 def metropolis_hastings(target: function, 
                         proposal: function, 
-                        random_proposal: function, 
+                        random_proposal: function,
                         initial_position: np.array, 
+                        symmetric_proposal = False,
                         chain_length = 100, 
                         burn_in = None, 
                         gen = np.random.default_rng()) -> np.array:
@@ -68,22 +69,37 @@ def metropolis_hastings(target: function,
         alpha = target(x)*proposal(y, x)/(target(y)*proposal(x, y))
         return min(1, alpha)
 
+    def get_alpha_symmetric(x, y):
+        alpha = target(x)/target(y)
+        return min(1, alpha)
+
     chain = np.zeros((chain_length, len(initial_position)))
     chain[0] = initial_position
     accepted = 0
-
-    for i in range(1, chain_length):
-        u = gen.uniform()
-        x_current = chain[i-1]
-        x_dash = random_proposal(x_current) 
-        a = get_alpha(x_dash, x_current)
-        
-        if u<a:
-            chain[i] = x_dash
-            accepted += 1
-        else:
-            chain[i] = chain[i-1]
-
+    if symmetric_proposal:
+        for i in range(1, chain_length):
+            u = gen.uniform()
+            x_current = chain[i-1]
+            x_dash = random_proposal(x_current) 
+            a = get_alpha_symmetric(x_dash, x_current)
+            #print(a, u)
+            if u<a:
+                chain[i] = x_dash
+                accepted += 1
+            else:
+                chain[i] = chain[i-1]
+    else:
+        for i in range(1, chain_length):
+            u = gen.uniform()
+            x_current = chain[i-1]
+            x_dash = random_proposal(x_current) 
+            a = get_alpha(x_dash, x_current)
+            #print(a, u)
+            if u<a:
+                chain[i] = x_dash
+                accepted += 1
+            else:
+                chain[i] = chain[i-1]
 
     if burn_in is not None:
         chain = chain[burn_in:]

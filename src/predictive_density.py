@@ -14,7 +14,8 @@ def predictive_density(
     P_grids,
     R_next,
     theta_next,
-    weight):
+    weight
+    ):
 
     y = np.asarray(y)
 
