@@ -6,7 +6,7 @@ import torch.distributions.normal as normal
 
 from scipy.stats import uniform, multivariate_normal
 
-def adaptive_mh(logdensityfunc, x0, sigma, nmoves=5, return_entire_chain=False, adapt=True, adapt_no = 100):
+def adaptive_mh(logdensityfunc, x0, sigma, nmoves=500, return_entire_chain=False, adapt=True, adapt_no = 100, burn_in = 250):
     acceptance = 0
     d = x0.shape[0]
     #print(sigma.dim())
@@ -16,7 +16,7 @@ def adaptive_mh(logdensityfunc, x0, sigma, nmoves=5, return_entire_chain=False, 
         x0chain = [x0.view(-1)]
 
     for iter in range(nmoves):
-        print('Fraction of steps:',iter/nmoves,'(Total:',nmoves,')')
+        #print('Fraction of steps:',iter/nmoves,'(Total:',nmoves,')')
         if np.remainder(iter, adapt_no)==0 and iter>0 and sigma.dim()>0 and adapt:
             sigma = torch.tensor((5.66/d)*(np.cov(np.array(x0chainnumpy)[-100:,:].T)+1e-10*np.eye(d)))
             #print('Time to update to sigma:', sigma)
@@ -43,14 +43,14 @@ def adaptive_mh(logdensityfunc, x0, sigma, nmoves=5, return_entire_chain=False, 
         #print('Updated value', x0)
         #if return_entire_chain:
 
-        print('Acceptance rate:', acceptance / (iter+1))
+        #print('Acceptance rate:', acceptance / (iter+1))
 
         x0chainnumpy.append(x0.detach().numpy())
         if return_entire_chain:
             x0chain.append(x0.view(-1))
-
+    print(acceptance/(iter+1))
     if return_entire_chain:
-        return torch.stack(x0chain)
+        return torch.stack(x0chain)[burn_in:]
     else:
         return xt.view(-1)
 
@@ -106,8 +106,6 @@ def metropolis_hastings(target: function,
 
     return chain, accepted/chain_length
 
-def adaptive_mh():
-    ...
 
 def mvn_def(covariance = None):
     if covariance is None:

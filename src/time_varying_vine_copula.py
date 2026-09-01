@@ -106,7 +106,7 @@ class tv_vinecop:
             self.conditioned_set = np.arange(1, observation_d+1)
             self.conditioning_set  = np.arange(1+observation_d+action_d, 2*(observation_d+action_d)+1)
             self.vine_cond_set = np.arange(2, 2+observation_d+action_d)
-            print(self.conditioning_set, self.conditioned_set, self.vine_cond_set)
+
         else:
             raise NotImplementedError("The conditioning set construction has not been implemented outside of reinforcement learning")
         self.cond_vines = []
@@ -128,7 +128,7 @@ class tv_vinecop:
 
         self.rbp.fit(p, c)
         p, c = self.rbp.eval(p, c)
-        self.last_state_postrbp = c[-1,:self.observation_d]
+        self.last_state_and_action_postrbp = [c[-1,:]]
         time_series = torch.from_numpy(c)
         sliding_dataset = SlidingWindowDataset(time_series, window_size = 1)
         ts = torch.stack([torch.cat((target, history.flatten())) for history, target in sliding_dataset]).squeeze(1).numpy()
@@ -145,8 +145,62 @@ class tv_vinecop:
         self.tv_cop.fit(self.ts_per_condvine, printout=check_tv)
 
 
-    def step_forward(self, data):
-        self.tv_cop.step_forward(data)
+    def step_forward(self, data, action):
+        '''
+        Takes a data point and moves the process to it. 
+
+        data is in its raw form and thus is transformed before storing it in self.last_state_post_rbp
+
+        This is ok when it is synchronous - we need to check how it is when we restart a chain. 
+
+        It may be useful to then take 2 data points to start from as this will give a good estimate of the 
+        conditional marginal copulas to start from. This would need to be a seperate function.
+        '''
+        cond_vine_cdfs = np.zeros((1, self.d-1))
+        data_and_action = np.concatenate((data, np.array([[action]])), axis=1)
+
+        p, c = self.kde_prior.eval(data_and_action)
+        _, c = self.rbp.eval(p, c)
+# Is it valid to propose the jump from the previous last state to the new last state - This could be very large and thus be unstable.
+# I think we need to initialise with a pair of observations, not just the initial state to keep this valid but need ot check whether this works
+# with the process as a whole.
+        time_series = torch.from_numpy(np.concatenate((self.last_state_and_action_postrbp, c), axis=0))
+
+        self.last_state_and_action_postrbp = c
+
+        #Probably don't need to do this, just concatenate them?
+        sliding_dataset = SlidingWindowDataset(time_series, window_size = 1)
+        ts = torch.stack([torch.cat((target, history.flatten())) for history, target in sliding_dataset]).squeeze(1).numpy()
+
+        for i, cond in enumerate(self.conditioned_set):
+            mask = np.concatenate(([cond - 1], self.conditioning_set - 1))
+            cond_vine_cdfs[:,i] = self.cond_vines[i].cdf_implicit(ts[:, mask])
+
+        self.tv_cop.step_forward(cond_vine_cdfs)
+
+    def jump_back(self, two_data, two_actions):
+        cond_vine_cdfs = np.zeros((1, self.d-1))
+        data_and_actions = np.concatenate((two_data, two_actions), axis=1)
+
+        p, c = self.kde_prior.eval(data_and_actions)
+        _, c = self.rbp.eval(p, c)
+
+        time_series = torch.from_numpy(c)
+
+        self.last_state_and_action_postrbp = [c[1,:]]
+
+        # Porbably don't need to do this, just concatenate them? test first and then edit.
+        sliding_dataset = SlidingWindowDataset(time_series, window_size = 1)
+        ts = torch.stack([torch.cat((target, history.flatten())) for history, target in sliding_dataset]).squeeze(1).numpy()
+
+        print(time_series.flatten())
+        print(ts)
+
+        for i, cond in enumerate(self.conditioned_set):
+            mask = np.concatenate(([cond - 1], self.conditioning_set - 1))
+            cond_vine_cdfs[:,i] = self.cond_vines[i].cdf_implicit(ts[:, mask])
+
+        self.tv_cop.step_forward(cond_vine_cdfs)
 
     def check_rbp_pdfs_real_line(self, x_min=-10, x_max=10, n_points=500):
         """
@@ -215,8 +269,61 @@ class tv_vinecop:
         fig.tight_layout()
         plt.show()
         return fig, axes
+
+    def check_rbp_times_conditional_vine(self, x_grid=None, n_points=200):
+        """
+        Plot the product of each fitted marginal RBP density and its paired
+        conditional vine copula pdf on the same grid of values after passing the
+        grid through the fitted prior KDE.
+        The RBP and conditional vine at the same array index are paired together.
+        """
+        if not hasattr(self, 'cond_vines') or len(self.cond_vines) == 0:
+            raise ValueError("No conditional vine copulas have been fitted yet.")
+        if not hasattr(self, 'rbp') or not hasattr(self.rbp, 'rhos'):
+            raise ValueError("The RBP model has not been fitted yet.")
+        if not hasattr(self, 'last_state_and_action_postrbp'):
+            raise ValueError("The fitted model has no stored last state for conditioning.")
+
+        if x_grid is None:
+            x_grid = np.linspace(-5, 5, n_points)
+        x_grid = np.asarray(x_grid, dtype=float)
+        if x_grid.ndim != 1:
+            raise ValueError("x_grid must be a 1D array of real-line values.")
+
+        n_pairs = min(len(self.cond_vines), len(self.rbp.rhos))
+        fig, axes = plt.subplots(1, n_pairs, figsize=(4 * n_pairs, 4), squeeze=False)
+
+        for i in range(n_pairs):
+            prior_grid = np.tile(x_grid, (self.d, 1)).T
+            prior_p, prior_c = self.kde_prior.eval(prior_grid)
+            rbp_pdf, rbp_cdf = self.rbp.eval(prior_p, prior_c)
+            rbp_pdf = rbp_pdf[:, i] if rbp_pdf.ndim > 1 else rbp_pdf
+            rbp_cdf = rbp_cdf[:, i] if rbp_cdf.ndim > 1 else rbp_cdf
+
+            vine = self.cond_vines[i]
+            d = len(vine.conditioning_set) + 1
+            cond_values = np.asarray(self.last_state_and_action_postrbp, dtype=float)
+            cond_values = cond_values[: max(0, d - 1)]
+            if cond_values.size < d - 1:
+                cond_values = np.pad(cond_values, (0, d - 1 - cond_values.size), constant_values=0.5)
+
+            vine_grid = np.full((x_grid.size, d), 0.5)
+            vine_grid[:, 0] = rbp_cdf
+            vine_grid[:, 1:] = np.tile(cond_values, (x_grid.size, 1))
+            vine_pdf = vine.pdf(vine_grid)
+
+            product = rbp_pdf * vine_pdf
+            axes[0, i].plot(x_grid, product, linewidth=2)
+            axes[0, i].set_title(f'RBP {i + 1} × conditional vine {i + 1}')
+            axes[0, i].set_xlabel('x')
+            axes[0, i].set_ylabel('product')
+            axes[0, i].grid(True, alpha=0.3)
+
+        fig.tight_layout()
+
+        return fig, axes
     
-    def pdf_predictive(self, data, action):
+    def pdf_predictive(self, data, action=0):
         if data.ndim != 2:
             data = np.expand_dims(data, axis=0)
         assert data.shape[0] == 1, "Currently we can only check one state at a time."
@@ -229,9 +336,9 @@ class tv_vinecop:
         p, c = self.kde_prior.eval(data_and_action)
         rbp_pdfs, c = self.rbp.eval(p, c)
 
-        last_state_and_action_postrbp = np.concatenate(([self.last_state_postrbp], [c[:, -1]]), axis = 1)
-
-        time_series = torch.from_numpy(np.concatenate((last_state_and_action_postrbp, c), axis=0))
+        #last_state_and_action_postrbp = np.concatenate(([self.last_state_postrbp], [c[:, -1]]), axis = 1)
+        #Could probably just change teh concatenation to speed this up
+        time_series = torch.from_numpy(np.concatenate((self.last_state_and_action_postrbp, c), axis=0))
 
         sliding_dataset = SlidingWindowDataset(time_series, window_size = 1)
         ts = torch.stack([torch.cat((target, history.flatten())) for history, target in sliding_dataset]).squeeze(1).numpy()
@@ -288,7 +395,6 @@ if __name__ == "__main__":
     if i <= n+1:
         observations = observations[:i]
         actions = actions[:i]
-    print(i)
     # if i>20:
     #     np.savetxt("actions.csv", actions, delimiter=",")
     #     exit = True
@@ -300,16 +406,24 @@ if __name__ == "__main__":
     tv = tv_vinecop()
     tv.fit(data, check_vines=False)
     print("Fit finished")
-    def target_func(copula:tv_vinecop, action):
+    def target_func(copula:tv_vinecop, action, log = False):
+        if log:
+            def log_pdf(x):
+                return np.log(copula.pdf_predictive(x, action))
+
+            return log_pdf
+
         def pdf(x):
-            return copula.pdf_predictive(x, action)
+            return (copula.pdf_predictive(x, action))
+              
         return pdf
+    
 
-    print(tv.pdf_predictive(np.array([observations[-2]]),0))
+    #print(tv.pdf_predictive(np.array([observations[-2]]),0))
+    fig, ax = tv.check_rbp_times_conditional_vine()
 
-
-    # tv.check_rbp_pdfs_real_line()
-    # tv.check_conditional_vine_pdfs()
+    plt.savefig("C:/Users/woodg/Documents/Vine_dissertation_chaeyun/plots_rl/conditionals")
+    tv.jump_back(observations[0:2], actions[0:2])
 
     print("Starting Metropolis Hastings")
     var = .0001
@@ -317,26 +431,31 @@ if __name__ == "__main__":
     sample = mh.sample_mvn(covariance=var)
     predicted_next = np.zeros_like(observations)
 
-    for i, act in enumerate(actions):
-        tv.step_forward(np.array([observations[i]]))
-        target = target_func(tv, actions[i][0])
-        chain, ar = mh.metropolis_hastings(target, prop, sample, np.array(observations[-10]), symmetric_proposal=True, chain_length=400, burn_in=50)
-        predicted_next[i] = np.mean(chain, axis = 0)
-        print(i, ar)
+    for i, act in enumerate(actions[2:]):
+        tv.step_forward(np.array([observations[i+1]]), act[0])
+        target = target_func(tv, act[0], log=True)
+        #chain, ar = mh.metropolis_hastings(target, prop, sample, np.array(observations[i+2]), symmetric_proposal=True, chain_length=800, burn_in=500)
+
+        chain = mh.adaptive_mh(target, torch.tensor(observations[i+2], dtype = torch.double), torch.eye(4, dtype=torch.double)*var, nmoves = 700, return_entire_chain=True, adapt_no=100, burn_in=400)
+        # fig, ax = plt.subplots(1,4)
+        # for j in range(4):
+        #     ax[j].plot(chain[:,j])
+        # plt.savefig(f"C:/Users/woodg/Documents/Vine_dissertation_chaeyun/plots_rl/chain{i}")
+        # plt.close()
+
+        predicted_next[i+2] = torch.mean(chain, axis = 0)
+        print(i, act[0])
 
     fig, ax = plt.subplots(2,4)
 
     for i in range(4):
-        ax[0, i].plot(observations[:,i])
-        ax[0, i].plot(predicted_next[:,i])
-        ax[1, i].plot(observations[:,i], predicted_next[:,i], '.')
+        ax[0, i].plot(observations[2:,i])
+        ax[0, i].plot(predicted_next[2:,i])
+        ax[1, i].plot(observations[2:,i], predicted_next[2:,i], '.')
 
     #print(observations[-11], observations[-10], np.mean(chain, axis=0), observations[-9])
-    plt.show()
-
-
-
-    # Now we must evaluate the predictive
+    plt.savefig("C:/Users/woodg/Documents/Vine_dissertation_chaeyun/plots_rl/roll_out_observation_shift")
+    plt.close()
 
 
     

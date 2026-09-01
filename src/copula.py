@@ -1202,14 +1202,25 @@ class time_varying_copula:
         pass
 
     def fit(self, c_data, printout = False):
+        '''
+        Fits the Time Varying Copula: a Generalised Autoregressive Score model
+
+        c_data: ArrayLike, the transformed data in the shape (n_samples, observation_d)
+        printout: bool, gives an indication of time taken to fit (doesn't time currently)
+        '''
         if printout:
             print("Starting fit")
         self.params, _, self.R_next, self.theta_next, self.weight = fit_gaussian_clayton_mixture(c_data)
-        print(self.R_next)
+
         if printout:
             print("Fit completed")
 
-    def pdf(self, c_data:torch.tensor):
+    def pdf(self, c_data:torch.tensor)-> torch.tensor:
+        '''
+        Evaluates the copula density function for the Time Varying Copula for all data points given.
+
+        c_data: ArrayLike, the data in the shape (n_samples, observation_d)
+        '''
         if type(c_data) != torch.tensor:
             c_data = torch.as_tensor(c_data)
         R_next = torch.as_tensor(self.R_next, dtype=torch.float64) # do we need these?
@@ -1250,9 +1261,19 @@ class time_varying_copula:
         c_mix = weight * c_G + (1.0 - weight) * c_C
         return c_mix
 
-    def step_forward(self, c_datum):
+    def step_forward(self, c_datum:np.ndarray):
+        '''
+        Steps the Time Varying Copula such that c_datum is the current value of the process.
+        Facilitates asynchronous prediction. 
+        
+        Takes a single transformed data point.
+
+        c_datum: ArrayLike, one data point in an array of shape (1, observation_d) on [0,1]^d.
+        '''
         if c_datum.shape[0] > 1:
             raise ValueError("The function can only do one step at a time currently")
+        if (np.any(c_datum < 0.0)) or (np.any(c_datum>1.0)):
+            raise ValueError("c_datum should be on [0,1]^d")
 
         copula_results = compute_time_varying_copula_paths(c_datum, estimated_parameters=self.params)
 
