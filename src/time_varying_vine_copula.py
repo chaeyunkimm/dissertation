@@ -2,12 +2,12 @@ import numpy as np
 import pyvinecopulib as pv
 import torch
 import gymnasium as gym
-import metropolis_hastings as mh
+import src.metropolis_hastings as mh
 import matplotlib.pyplot as plt
 
-from copula import conditional_vine_copula, time_varying_copula
-from R_BP_james import rbp_process
-from scipy.stats import gaussian_kde
+from src.copula import conditional_vine_copula, time_varying_copula
+from src.R_BP_james import rbp_process
+from scipy.stats import gaussian_kde, cauchy
 from scipy.special import ndtr
 
 from torch.utils.data import Dataset
@@ -65,20 +65,18 @@ class kde_prior:
     def __init__(self):
         self.kdes = []
 
-
     def fit(self, observations):
         n, self.d = observations.shape
 
-        p0_grid = np.zeros((n, self.d))
-        P0_grid = np.zeros((n, self.d))
+        # p0_grid = np.zeros((n, self.d))
+        # P0_grid = np.zeros((n, self.d))
 
         for i in range(self.d):
             # Fit prior distributions and transform data for rbp
             kde = gaussian_kde(observations.T[i])
-
             self.kdes.append(kde)
-            p0_grid[:,i] = kde(observations.T[i])
-            P0_grid[:,i] = np.mean(ndtr((observations.T[i] - kde.dataset.T) / np.sqrt(kde.covariance[0, 0])), axis=0)
+            # p0_grid[:,i] = kde(observations.T[i])
+            # P0_grid[:,i] = np.mean(ndtr((observations.T[i] - kde.dataset.T) / np.sqrt(kde.covariance[0, 0])), axis=0)
 
     def eval(self, data):
         n, _ = data.shape
@@ -94,6 +92,73 @@ class kde_prior:
 
         return p0_grid, P0_grid
 
+
+class cauchy_prior:
+    def __init__(self):
+        self.cauchies = []
+
+    def fit(self, observations):
+        n, self.d = observations.shape
+        for i in range(self.d):
+            dist = cauchy().fit(observations[:, i])
+            self.cauchies.append(dist)
+
+    def eval(self, data):
+        n, _ = data.shape
+        p0_grid = np.zeros((n, self.d))
+        P0_grid = np.zeros((n, self.d))
+        for dist in self.cauchies:
+            p0_grid = dist.pdf(data)
+            P0_grid = dist.cdf(data)
+
+        return p0_grid, P0_grid
+
+def interval_to_R(x:torch.tensor, low:float, high:float) -> torch.tensor: 
+    '''
+    Tranforms from an interval to the real line via a logit tranformation.
+
+    Low and high are the interval bounds.
+    ''' 
+    frac = (x - low)/(high - low ) 
+    y = torch.special.logit(frac, eps=1e-6)     
+    return y
+
+def R_to_interval(r:torch.tensor, low:float, high:float) -> torch.tensor:
+    '''
+    Transforms from the real line to an interval.
+
+    Low and high are the interval bounds.
+    '''
+    y = torch.special.expit(r)
+    x = y*(high-low)+low
+    return x
+
+def angle_to_R2(x:torch.tensor) -> torch.tensor:
+    '''
+    Transforms from an angle to a pair of values on the real line.
+    '''
+    sin_angles = torch.sin(x)
+    cos_angles = torch.cos(x)
+
+    ### transform to R
+    sin_angles_r = interval_to_R(sin_angles, -1.0, 1.0)
+    cos_angles_r = interval_to_R(cos_angles, -1.0, 1.0)
+
+    return sin_angles_r, cos_angles_r
+
+def R2_to_angle(r2:torch.tensor) -> torch.tensor:
+    '''
+    Transforms from a pair of values on the real line to an angle.
+    '''
+    sin_angles_r = r2[:, 0]
+    cos_angles_r = r2[:, 1]
+
+    sin_angles = R_to_interval(sin_angles_r, -1.0, 1.0)
+    cos_angles = R_to_interval(cos_angles_r, -1.0, 1.0)
+
+    theta = torch.atan2(sin_angles, cos_angles)
+
+    return theta
 
 class tv_vinecop:
     '''
@@ -164,13 +229,14 @@ class tv_vinecop:
 # Is it valid to propose the jump from the previous last state to the new last state - This could be very large and thus be unstable.
 # I think we need to initialise with a pair of observations, not just the initial state to keep this valid but need ot check whether this works
 # with the process as a whole.
-        time_series = torch.from_numpy(np.concatenate((self.last_state_and_action_postrbp, c), axis=0))
+        #time_series = torch.from_numpy(np.concatenate((self.last_state_and_action_postrbp, c), axis=0))
+        ts = np.expand_dims(np.concatenate((c, self.last_state_and_action_postrbp), axis = None), 0)
 
         self.last_state_and_action_postrbp = c
 
         #Probably don't need to do this, just concatenate them?
-        sliding_dataset = SlidingWindowDataset(time_series, window_size = 1)
-        ts = torch.stack([torch.cat((target, history.flatten())) for history, target in sliding_dataset]).squeeze(1).numpy()
+        # sliding_dataset = SlidingWindowDataset(time_series, window_size = 1)
+        # ts = torch.stack([torch.cat((target, history.flatten())) for history, target in sliding_dataset]).squeeze(1).numpy()
 
         for i, cond in enumerate(self.conditioned_set):
             mask = np.concatenate(([cond - 1], self.conditioning_set - 1))
@@ -337,11 +403,8 @@ class tv_vinecop:
         rbp_pdfs, c = self.rbp.eval(p, c)
 
         #last_state_and_action_postrbp = np.concatenate(([self.last_state_postrbp], [c[:, -1]]), axis = 1)
-        #Could probably just change teh concatenation to speed this up
-        time_series = torch.from_numpy(np.concatenate((self.last_state_and_action_postrbp, c), axis=0))
 
-        sliding_dataset = SlidingWindowDataset(time_series, window_size = 1)
-        ts = torch.stack([torch.cat((target, history.flatten())) for history, target in sliding_dataset]).squeeze(1).numpy()
+        ts = np.expand_dims(np.concatenate((c, self.last_state_and_action_postrbp), axis = None), 0)
 
         for i, cond in enumerate(self.conditioned_set):
             mask = np.concatenate(([cond - 1], self.conditioning_set - 1))
@@ -353,7 +416,7 @@ class tv_vinecop:
         return np.prod(np.concatenate((rbp_pdfs, cond_vine_pdfs), axis = 1), axis = 1)*tv_p
 
 
-    def cdf(self, data):
+    def predict_next_state(self, action):
         pass
 
 if __name__ == "__main__":
@@ -402,6 +465,7 @@ if __name__ == "__main__":
     env.close()
 
     data = np.concatenate((observations, actions), axis=1)
+
     print("Starting Fit")
     tv = tv_vinecop()
     tv.fit(data, check_vines=False)
@@ -420,41 +484,46 @@ if __name__ == "__main__":
     
 
     #print(tv.pdf_predictive(np.array([observations[-2]]),0))
-    fig, ax = tv.check_rbp_times_conditional_vine()
+    # fig, ax = tv.check_rbp_times_conditional_vine()
 
-    plt.savefig("C:/Users/woodg/Documents/Vine_dissertation_chaeyun/plots_rl/conditionals")
-    tv.jump_back(observations[0:2], actions[0:2])
+    # plt.savefig("C:/Users/woodg/Documents/Vine_dissertation_chaeyun/plots_rl/conditionals")
+    # start = np.repeat([observations[0]], repeats=2, axis = 0)
+    # start_act = np.repeat([actions[0]], repeats = 2, axis = 0)
+    # tv.jump_back(start, start_act)
+
+    tv.step_forward(np.array([observations[0]]), actions[0][0])
 
     print("Starting Metropolis Hastings")
     var = .0001
     prop = mh.mvn_def(covariance=var)
     sample = mh.sample_mvn(covariance=var)
     predicted_next = np.zeros_like(observations)
+    predicted_next[0] = observations[0]
 
-    for i, act in enumerate(actions[2:]):
-        tv.step_forward(np.array([observations[i+1]]), act[0])
+    for i, act in enumerate(actions[0:-1]):
         target = target_func(tv, act[0], log=True)
         #chain, ar = mh.metropolis_hastings(target, prop, sample, np.array(observations[i+2]), symmetric_proposal=True, chain_length=800, burn_in=500)
+        chain = mh.adaptive_mh(target, torch.tensor(predicted_next[i], dtype = torch.double), torch.eye(4, dtype=torch.double)*var, nmoves = 700, return_entire_chain=True, adapt_no=100, burn_in=400)
 
-        chain = mh.adaptive_mh(target, torch.tensor(observations[i+2], dtype = torch.double), torch.eye(4, dtype=torch.double)*var, nmoves = 700, return_entire_chain=True, adapt_no=100, burn_in=400)
         # fig, ax = plt.subplots(1,4)
         # for j in range(4):
         #     ax[j].plot(chain[:,j])
         # plt.savefig(f"C:/Users/woodg/Documents/Vine_dissertation_chaeyun/plots_rl/chain{i}")
         # plt.close()
 
-        predicted_next[i+2] = torch.mean(chain, axis = 0)
+        predicted_next[i+1] = torch.mean(chain, axis = 0)
         print(i, act[0])
+        tv.step_forward(np.array([predicted_next[i+1]]), actions[i+1][0])
 
     fig, ax = plt.subplots(2,4)
 
     for i in range(4):
-        ax[0, i].plot(observations[2:,i])
-        ax[0, i].plot(predicted_next[2:,i])
-        ax[1, i].plot(observations[2:,i], predicted_next[2:,i], '.')
+        ax[0, i].plot(observations[1:,i])
+        ax[0, i].plot(predicted_next[1:,i])
+        ax[1, i].plot(observations[1:,i], predicted_next[1:,i], '.')
 
     #print(observations[-11], observations[-10], np.mean(chain, axis=0), observations[-9])
-    plt.savefig("C:/Users/woodg/Documents/Vine_dissertation_chaeyun/plots_rl/roll_out_observation_shift")
+    plt.savefig("C:/Users/woodg/Documents/Vine_dissertation_chaeyun/plots_rl/roll_out_no_observations")
     plt.close()
 
 
