@@ -6,7 +6,7 @@ import src.metropolis_hastings as mh
 import matplotlib.pyplot as plt
 
 from src.copula import conditional_vine_copula, time_varying_copula
-from src.R_BP_james import rbp_process
+from src.R_BP_james import rbp_process, R_BP_density_U
 from scipy.stats import gaussian_kde, cauchy
 from scipy.special import ndtr
 
@@ -95,21 +95,23 @@ class kde_prior:
 
 class cauchy_prior:
     def __init__(self):
-        self.cauchies = []
+        self.locs = []
+        self.scales = []
 
     def fit(self, observations):
         n, self.d = observations.shape
         for i in range(self.d):
-            dist = cauchy().fit(observations[:, i])
-            self.cauchies.append(dist)
+            loc, scale = cauchy.fit(observations[:, i])
+            self.locs.append(loc)
+            self.scales.append(scale)
 
     def eval(self, data):
         n, _ = data.shape
         p0_grid = np.zeros((n, self.d))
         P0_grid = np.zeros((n, self.d))
-        for dist in self.cauchies:
-            p0_grid = dist.pdf(data)
-            P0_grid = dist.cdf(data)
+        for loc, scale in zip(self.locs, self.scales):
+            p0_grid = cauchy.pdf(data, loc=loc, scale=scale)
+            P0_grid = cauchy.cdf(data, loc=loc, scale=scale)
 
         return p0_grid, P0_grid
 
@@ -144,12 +146,15 @@ def angle_to_R2(x:torch.tensor) -> torch.tensor:
     sin_angles_r = interval_to_R(sin_angles, -1.0, 1.0)
     cos_angles_r = interval_to_R(cos_angles, -1.0, 1.0)
 
-    return sin_angles_r, cos_angles_r
+    return torch.column_stack((sin_angles_r, cos_angles_r))
 
 def R2_to_angle(r2:torch.tensor) -> torch.tensor:
     '''
     Transforms from a pair of values on the real line to an angle.
     '''
+    if r2.dim() == 1:
+        r2.unsqueeze(0)
+
     sin_angles_r = r2[:, 0]
     cos_angles_r = r2[:, 1]
 
@@ -159,6 +164,95 @@ def R2_to_angle(r2:torch.tensor) -> torch.tensor:
     theta = torch.atan2(sin_angles, cos_angles)
 
     return theta
+
+class obs_transform_pendulum:
+    def __init__(self, standardise = True):
+        self.means = None
+        self.stds = None
+        self.standardise = standardise
+
+    def fit(self, observations:torch.tensor):
+        angles = angle_to_R2(observations[:, 1])
+
+        new_data = torch.column_stack((observations[:,0], angles, observations[:, 2:]))
+        if self.standardise:
+            self.means = torch.mean(new_data, axis =0)
+            self.stds =  torch.std(new_data, axis = 0)
+        else:
+            self.means = torch.zeros_like(new_data[0,:])
+            self.stds = torch.ones_like(new_data[0, :])
+
+    def transform(self, observations:torch.tensor) -> torch.tensor:
+        '''
+        Performs transformations on the angle and the action to make the priors and rbp valid.
+        '''
+        if (self.means is None) or (self.stds is None):
+            raise ValueError("Transform has not been fitted, please call fit or set means and stds before transforming.")
+        
+        angles = angle_to_R2(observations[:, 1])
+
+        new_data = torch.column_stack((observations[:,0], angles, observations[:, 2:]))
+
+        return (new_data-self.means)/self.stds
+
+    def inverse_transform(self, trans_obs:torch.tensor)->torch.tensor:
+        '''
+        Performs appropriate inverse transformations of the angle data, reshapes tensor to be
+        of observation shape.
+        '''
+        trans_obs = trans_obs*self.stds + self.means
+
+        if trans_obs.dim() == 1:
+            trans_obs.unsqueeze(0)
+
+        angle = R2_to_angle(trans_obs[:, 1:3])
+
+        new_data = torch.column_stack((trans_obs[:,0], angle, trans_obs[:, 3:]))
+
+        return new_data
+
+class action_transform_pendulum:
+    def __init__(self, low = -3.0, high = 3.0, standardise = True):
+        self.mean = None
+        self.std = None
+        self.low = low
+        self.high = high
+        self.standardise = standardise
+
+    def fit(self, actions:torch.tensor):
+
+        r_actions = interval_to_R(actions, self.low, self.high)
+        if self.standardise:
+            self.mean = torch.mean(r_actions)
+            self.std = torch.std(r_actions)
+        else:
+            self.mean = 0
+            self.std = 1
+
+    def transform(self, actions:torch.tensor)->torch.tensor:
+
+        r_actions = interval_to_R(actions, self.low, self.high)
+
+        return (r_actions-self.mean)/self.std
+    
+    def inverse_transform(self, r_actions:torch.tensor)->torch.tensor:
+
+        actions = r_actions*self.std + self.mean
+        actions = R_to_interval(actions, self.low, self.high)
+
+        return actions
+
+def target_func(copula:tv_vinecop, action, log = False):
+        if log:
+            def log_pdf(x):
+                return np.log(copula.pdf_predictive(x, action))
+
+            return log_pdf
+
+        def pdf(x):
+            return (copula.pdf_predictive(x, action))
+              
+        return pdf
 
 class tv_vinecop:
     '''
@@ -176,9 +270,10 @@ class tv_vinecop:
             raise NotImplementedError("The conditioning set construction has not been implemented outside of reinforcement learning")
         self.cond_vines = []
         self.rbp = rbp_process()
-        self.kde_prior = kde_prior()
+        self.prior = cauchy_prior()
         self.tv_cop = time_varying_copula()
         self.observation_d = observation_d
+        self.action_d = action_d
 
     def fit(self, data, check_vines = False, check_tv = False):
         '''
@@ -187,9 +282,10 @@ class tv_vinecop:
 
         n, self.d = data.shape
         self.ts_per_condvine = np.zeros((n-1, self.d-1))
+        self.last_state = data[-1, :-1]
 
-        self.kde_prior.fit(data)
-        p, c = self.kde_prior.eval(data)
+        self.prior.fit(data)
+        p, c = self.prior.eval(data)
 
         self.rbp.fit(p, c)
         p, c = self.rbp.eval(p, c)
@@ -209,7 +305,6 @@ class tv_vinecop:
 
         self.tv_cop.fit(self.ts_per_condvine, printout=check_tv)
 
-
     def step_forward(self, data, action):
         '''
         Takes a data point and moves the process to it. 
@@ -221,22 +316,19 @@ class tv_vinecop:
         It may be useful to then take 2 data points to start from as this will give a good estimate of the 
         conditional marginal copulas to start from. This would need to be a seperate function.
         '''
+        self.last_state = data[0, :]
+        print(self.last_state.shape)
         cond_vine_cdfs = np.zeros((1, self.d-1))
         data_and_action = np.concatenate((data, np.array([[action]])), axis=1)
 
-        p, c = self.kde_prior.eval(data_and_action)
+        p, c = self.prior.eval(data_and_action)
         _, c = self.rbp.eval(p, c)
 # Is it valid to propose the jump from the previous last state to the new last state - This could be very large and thus be unstable.
 # I think we need to initialise with a pair of observations, not just the initial state to keep this valid but need ot check whether this works
 # with the process as a whole.
-        #time_series = torch.from_numpy(np.concatenate((self.last_state_and_action_postrbp, c), axis=0))
         ts = np.expand_dims(np.concatenate((c, self.last_state_and_action_postrbp), axis = None), 0)
 
         self.last_state_and_action_postrbp = c
-
-        #Probably don't need to do this, just concatenate them?
-        # sliding_dataset = SlidingWindowDataset(time_series, window_size = 1)
-        # ts = torch.stack([torch.cat((target, history.flatten())) for history, target in sliding_dataset]).squeeze(1).numpy()
 
         for i, cond in enumerate(self.conditioned_set):
             mask = np.concatenate(([cond - 1], self.conditioning_set - 1))
@@ -244,11 +336,11 @@ class tv_vinecop:
 
         self.tv_cop.step_forward(cond_vine_cdfs)
 
-    def jump_back(self, two_data, two_actions):
+    def _jump_back(self, two_data, two_actions):
         cond_vine_cdfs = np.zeros((1, self.d-1))
         data_and_actions = np.concatenate((two_data, two_actions), axis=1)
 
-        p, c = self.kde_prior.eval(data_and_actions)
+        p, c = self.prior.eval(data_and_actions)
         _, c = self.rbp.eval(p, c)
 
         time_series = torch.from_numpy(c)
@@ -272,23 +364,21 @@ class tv_vinecop:
         """
         Plot each fitted RBP marginal PDF over the real line against its prior KDE.
         Useful for checking whether each marginal transformation looks sensible.
-        """
-        from R_BP_james import R_BP_density_U
+        """ 
 
         if not hasattr(self, 'rbp') or not hasattr(self.rbp, 'rhos'):
             raise ValueError("The RBP model has not been fitted yet.")
-
+        print(self.rbp.rhos)
         x_grid = np.linspace(x_min, x_max, n_points)
-        fig, axes = plt.subplots(1, self.observation_d, figsize=(4 * self.observation_d, 4), squeeze=False)
+        fig, axes = plt.subplots(1, self.observation_d+self.action_d, figsize=(4 * self.observation_d, 4), squeeze=False)
 
-        for j in range(self.observation_d):
-            kde = self.kde_prior.kdes[j]
-            prior_p = kde(x_grid)
-            prior_c = np.mean(ndtr((x_grid - kde.dataset.T) / np.sqrt(kde.covariance[0, 0])), axis=0)
-            rbp_p, _ = R_BP_density_U(self.rbp.rhos[j], prior_p, prior_c, self.rbp.pivots[:, j])
+        prior_p, prior_c = self.prior.eval(np.repeat([x_grid], self.observation_d+self.action_d, axis=0).T)
+        rbp_p, rbp_c = self.rbp.eval(prior_p, prior_c) 
 
-            axes[0, j].plot(x_grid, prior_p, linestyle='--', alpha=0.7, label='prior KDE')
-            axes[0, j].plot(x_grid, rbp_p, linewidth=2, label='RBP PDF')
+        for j in range(self.observation_d+self.action_d):
+
+            axes[0, j].plot(x_grid, prior_p[:,j], linestyle='--', alpha=0.7, label='Prior')
+            axes[0, j].plot(x_grid, rbp_p[:,j], linewidth=2, label='RBP PDF')
             axes[0, j].set_title(f'Marginal {j + 1}')
             axes[0, j].set_xlabel('x')
             axes[0, j].set_ylabel('density')
@@ -303,10 +393,6 @@ class tv_vinecop:
         Inspect each conditional vine copula pdf while conditioning on the last
         observed time-series point and varying only the conditioned coordinate.
         """
-        if not hasattr(self, 'cond_vines') or len(self.cond_vines) == 0:
-            raise ValueError("No conditional vine copulas have been fitted yet.")
-        if not hasattr(self, 'last_state_postrbp'):
-            raise ValueError("The fitted model has no stored last state for conditioning.")
 
         u_grid = np.linspace(1e-3, 1 - 1e-3, n_points)
         n_vines = len(self.cond_vines)
@@ -317,7 +403,7 @@ class tv_vinecop:
             # so fix the conditioning variables at the last observed post-RBP state
             # and pad any missing slots to match the model dimension.
             d = len(vine.conditioning_set) + 1
-            cond_values = np.asarray(self.last_state_postrbp, dtype=float)
+            cond_values = np.asarray(self.last_state_and_action_postrbp, dtype=float)
             cond_values = cond_values[: max(0, d - 1)]
             if cond_values.size < d - 1:
                 cond_values = np.pad(cond_values, (0, d - 1 - cond_values.size), constant_values=0.5)
@@ -361,7 +447,7 @@ class tv_vinecop:
 
         for i in range(n_pairs):
             prior_grid = np.tile(x_grid, (self.d, 1)).T
-            prior_p, prior_c = self.kde_prior.eval(prior_grid)
+            prior_p, prior_c = self.prior.eval(prior_grid)
             rbp_pdf, rbp_cdf = self.rbp.eval(prior_p, prior_c)
             rbp_pdf = rbp_pdf[:, i] if rbp_pdf.ndim > 1 else rbp_pdf
             rbp_cdf = rbp_cdf[:, i] if rbp_cdf.ndim > 1 else rbp_cdf
@@ -370,8 +456,6 @@ class tv_vinecop:
             d = len(vine.conditioning_set) + 1
             cond_values = np.asarray(self.last_state_and_action_postrbp, dtype=float)
             cond_values = cond_values[: max(0, d - 1)]
-            if cond_values.size < d - 1:
-                cond_values = np.pad(cond_values, (0, d - 1 - cond_values.size), constant_values=0.5)
 
             vine_grid = np.full((x_grid.size, d), 0.5)
             vine_grid[:, 0] = rbp_cdf
@@ -389,20 +473,21 @@ class tv_vinecop:
 
         return fig, axes
     
-    def pdf_predictive(self, data, action=0):
+    def pdf_predictive(self, data):
+        '''
+        The probability of a state given the previous state and action stored in the object by fit or step_forward
+        '''
         if data.ndim != 2:
             data = np.expand_dims(data, axis=0)
         assert data.shape[0] == 1, "Currently we can only check one state at a time."
 
-        data_and_action = np.concatenate((data, np.array([[action]])), axis=1)
+        data_and_action = np.concatenate((data, np.array([[0]])), axis=1)
 
         cond_vine_pdfs = np.zeros((1, self.d-1))
         cond_vine_cdfs = np.zeros((1, self.d-1))
         
-        p, c = self.kde_prior.eval(data_and_action)
+        p, c = self.prior.eval(data_and_action)
         rbp_pdfs, c = self.rbp.eval(p, c)
-
-        #last_state_and_action_postrbp = np.concatenate(([self.last_state_postrbp], [c[:, -1]]), axis = 1)
 
         ts = np.expand_dims(np.concatenate((c, self.last_state_and_action_postrbp), axis = None), 0)
 
@@ -415,9 +500,24 @@ class tv_vinecop:
         #print(tv_p, rbp_pdfs, cond_vine_pdfs)
         return np.prod(np.concatenate((rbp_pdfs, cond_vine_pdfs), axis = 1), axis = 1)*tv_p
 
+    def predict_next_state(self, action, covariance = .0001, chain_length = 500, burn_in = 250, check_chain = False):
+        '''
+        Predicts the next state given the previous state and an action
+        '''
+        prop = mh.mvn_def(covariance=covariance)
+        sample = mh.sample_mvn(covariance=covariance)
+        print(self.last_state)
+        #target = target_func(self, action, log=False)
+        chain, ar = mh.metropolis_hastings(self.pdf_predictive, prop, sample, np.array(self.last_state), symmetric_proposal=True, chain_length=chain_length, burn_in=burn_in)
+    
+        fig = None
 
-    def predict_next_state(self, action):
-        pass
+        if check_chain:
+            fig, ax = plt.subplots(1,self.observation_d)
+            for j in range(self.observation_d):
+                ax[j].plot(chain[:,j])
+
+        return np.mean(chain, axis = 0), np.std(chain, axis = 0), ar, fig
 
 if __name__ == "__main__":
 
