@@ -7,6 +7,11 @@ from scipy.stats import norm, multivariate_normal, gaussian_kde
 from scipy.optimize import minimize, brentq
 from scipy.special import ndtr
 
+def get_alpha(k):
+    '''
+    Calculates the alpha for the rbp process, change here to change for all code
+    '''
+    return (2-1/k)/(k+1)
 
 def gaussian_copula_density(u, v, rho):
 
@@ -60,7 +65,7 @@ def gaussian_conditional_cdf(u, v, rho):
     z_u = norm.ppf(u)
     z_v = norm.ppf(v)
 
-    return norm.cdf((z_u - rho * z_v) / np.sqrt(1 - rho**2))
+    return norm.cdf((z_u - rho * z_v) / np.sqrt(1 - np.square(rho)))
 
 def normal_cdf(z):
     return 0.5 * (1.0 + torch.erf(z / torch.sqrt(torch.tensor(2.0, dtype=z.dtype))))
@@ -78,7 +83,7 @@ def R_BP_torch_edit(n, rho, p0_grid, P0_grid):
     P = P0_grid #.clone() This hopefully won't cause any autodif problems - let's test it!
 
     for i in range(n):
-        alpha = 1 / (i + 2)
+        alpha = get_alpha(i+1)
 
         u = P # P_{i-1}(x_grid) : grid 전체에 대한 cdf값들 
         u_i = P[i] #P_{i-1}(x_n)
@@ -121,7 +126,7 @@ def R_BP_density(n, rho, p0_grid, P0_grid, U = None):
         for i in range(n):
 
             # weight
-            alpha = 1 / (i + 2)
+            alpha = get_alpha(i+1)
 
             u = P # P_{i-1}(x_grid) 
             u_i = P[i] #P_{i-1}(x_n)
@@ -137,7 +142,7 @@ def R_BP_density(n, rho, p0_grid, P0_grid, U = None):
         for i in range(len(U)):
 
             # weight
-            alpha = 1 / (i + 2)
+            alpha = get_alpha(i+1)
 
             u = P # P_{i-1}(x_grid) 
             u_i = U[i] #P_{i-1}(x_i)
@@ -156,7 +161,7 @@ def R_BP_density_U(rho, p0, P0, U):
     for i, ui in enumerate(U):
 
             # weight
-            alpha = 1 / (i + 2)
+            alpha = get_alpha(i+1)
 
             u = P # P_{i-1}(x_grid) 
             u_i = ui #P_{i-1}(x_i)
@@ -177,7 +182,7 @@ def R_BP_coefs(rho, p0_obs, P0_obs):
     for i in range(n):
 
         # weight
-        alpha = 1 / (i + 2)
+        alpha = get_alpha(i+1)
 
         u = P # P_{i-1}(x_grid) 
         U[i] = P[i] #P_{i-1}(x_n)
@@ -242,7 +247,7 @@ def invert_rbp_cdf(data:np.ndarray, rhos:np.ndarray, Us:np.ndarray, P0_inv:funct
     n = Us.shape[0]
     d = Us.shape[1]
 
-    def eq(U_prev, alpha, v, U):
+    def eq(alpha, v, U):
         def f(U_prev):
             return ((1 - alpha) * U_prev + alpha * gaussian_conditional_cdf(U_prev, v, rho) - U)
         return f
@@ -254,12 +259,12 @@ def invert_rbp_cdf(data:np.ndarray, rhos:np.ndarray, Us:np.ndarray, P0_inv:funct
         # backward recursion
         for i in reversed(range(n)):
 
-            alpha = 1/(i+2)
+            alpha = get_alpha(i+1)
 
-            func = eq(U_prev, alpha, Us[i], current_U)
+            func = eq(alpha, Us[i], current_U) 
 
             # finding root : f(U_pre) = 0 
-            U_prev = brentq(eq, 1e-10, 1 - 1e-10)
+            U_prev = brentq(func, 1e-10, 1 - 1e-10)
 
             current_U = U_prev
 
@@ -291,6 +296,49 @@ class rbp_process:
 
     def eval(self, p_data, c_data):
         return R_BP_density_U(self.rhos, p_data, c_data, self.pivots)
+
+    def inverse_cdf(self, rbp_c_data:np.ndarray)->np.ndarray:
+        '''
+        Go from 1 evaluation of the RBP CDF back to a value in X.
+    
+        Parameters:
+        -----------
+        data : Evaluations to be inverted
+        rhos : Bandwidth parameter
+        Us : Trained intermediary RBP CDF evaluations
+        '''
+        n, d = self.pivots.shape
+        inverted_data = np.zeros_like(rbp_c_data)
+
+        def eq(alpha, v, U):
+            def f(U_prev):
+                return ((1 - alpha) * U_prev + alpha * gaussian_conditional_cdf(U_prev, v, rho) - U)
+            return f
+
+        for i, c_datum in enumerate(rbp_c_data):
+            print(f"Datum {i}")
+            for j, (rho, current_U) in enumerate(zip(self.rhos, c_datum)):
+                #current_U = current_U[0]
+                inv_datum = np.zeros_like(c_datum)
+
+                # backward recursion
+                for k, pivot in enumerate(reversed(self.pivots)):
+                    idx = n-1-k
+
+                    alpha = get_alpha(idx+1)
+        
+                    func = eq(alpha, pivot[0], current_U) 
+        
+                    # finding root : f(U_pre) = 0 
+                    U_prev = brentq(func, 1e-10, 1 - 1e-10)
+        
+                    current_U = U_prev
+
+                inv_datum[j] = current_U
+
+            inverted_data[i] = inv_datum
+
+        return inverted_data
 
     def plot_real_line_pdfs(self, x_grid=None, n_points=500):
         """

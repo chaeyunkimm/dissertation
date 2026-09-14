@@ -365,8 +365,11 @@ class conditional_vine_copula:
     Class to mimic some of pv.Vinecop for cleaner code.
 
     Can calculate the pdf of a conditional vine copula when passed a pv.Vinecop object constructed with a conditional set.
+
+    Currently assumes all discrete variables are at the end of the array passed to the vine.
+    i.e. n continuous, q discrete, q discrete left limits
     '''
-    def __init__(self, conditioning_set, vine:pv.Vinecop = None):
+    def __init__(self, conditioning_set, vine:pv.Vinecop = None, n_discrete = 0):
         if len(conditioning_set) == 1:
             print("WARNING: This wil not produce the true conditional pdf, you must not multiply by the marginal of the conditioning variable")
         if len(conditioning_set) == 2:
@@ -381,17 +384,25 @@ class conditional_vine_copula:
             self.ed_set = np.setdiff1d(vine.order, conditioning_set)
 
         self.conditioning_set = np.array(conditioning_set)
+        self.n_discrete = n_discrete
+        self.var_types = ["c"]*max(conditioning_set)
+        if n_discrete >0:
+            self.var_types = ["c"]*(max(conditioning_set)-1)+["d"]*n_discrete
+            print(f"var_types = {self.var_types}")
+
 
     def fit_from_data(self, data, controls = pv.FitControlsVinecop(), check_vine = False):
         controls.conditioning_set = self.conditioning_set
-        self.vine = pv.Vinecop.from_data(data, controls=controls)
+        self.vine = pv.Vinecop.from_data(data, var_types=self.var_types, controls=controls)
+
         self.ed_set = np.setdiff1d(self.vine.order, self.conditioning_set)
         self.trees_np = np.fromiter(chain.from_iterable(self.vine.get_trees()), dtype=object)
+
         self.subtree_mask = self.__find_subtree_mask(self.conditioning_set)
         self.subtrees_np = self.trees_np[self.subtree_mask]
+
         if check_vine:
             print(self.vine)
-
 
     def __find_subtree_mask(self, conditioning_set:tuple)->np.array:
         '''
@@ -494,16 +505,131 @@ class conditional_vine_copula:
             h_evals[d+end_first_tree+j,1] = cop['pair_copula'].hfunc2(h_evals[mask].T)
 
         return h_evals, (h_pointers[:,0], h_pointers[:,1])
-    
+
     def pdf(self, data: np.array)->np.array:
         density = 1 # This expands out to nd automatically if data is nd
-        h_evals, h_points = self.__eval_h_functions(data)
+        if self.n_discrete>0:
+            #could speed this up by working with the original structure given.
+            edge_pdfs = np.fromiter(chain.from_iterable(self.vine.pdf_full(data)['pdf_edges']), dtype=object)
+            for i, mask in enumerate(self.subtree_mask):
+                if mask:
+                    density *= edge_pdfs[i]
 
-        for i, mask in enumerate(self.subtree_mask):
-            if mask:
-                density *= self.trees_np[i]['pair_copula'].pdf(h_evals[h_points][i].T)
+        else:
+            
+            h_evals, h_points = self.__eval_h_functions(data)
+
+            for i, mask in enumerate(self.subtree_mask):
+                if mask:
+                    density *= self.trees_np[i]['pair_copula'].pdf(h_evals[h_points][i].T)
 
         return density
+
+    @staticmethod
+    def __get_filled_hfunc(hfuncs):
+        for hfunc in hfuncs:
+            if hfunc is not None and hfunc.size:
+                return hfunc
+        print("No filled h-function was found.")
+
+        return None
+
+    def __resolve_independence_hfunc(self, pdf_full, data, tree_idx, edge_idx,
+                                     hfunc_idx, sub=False, resolving=None):
+        """Recover a missing h-function for an independence edge."""
+        if resolving is None:
+            resolving = set()
+
+        key = (tree_idx, edge_idx, hfunc_idx, sub)
+        if key in resolving:
+            return None
+        resolving.add(key)
+
+        field = ("hfunc1_sub" if sub else "hfunc1") if hfunc_idx == 0 else (
+            "hfunc2_sub" if sub else "hfunc2"
+        )
+        stored = pdf_full[field][tree_idx][edge_idx]
+        if stored.size:
+            return stored
+
+        edge = self.vine.get_trees()[tree_idx][edge_idx]
+        if edge["pair_copula"].family != pv.BicopFamily.indep:
+            return None
+
+        conditioned = edge["conditioned"]
+        variable = conditioned[1] if hfunc_idx == 0 else conditioned[0]
+
+        if tree_idx == 0:
+            dimension = self.vine.dim
+            variable_idx = variable - 1
+            if sub and variable > dimension - self.n_discrete:
+                variable_idx = dimension + variable - (dimension - self.n_discrete) - 1
+            return data[:, variable_idx]
+
+        conditioning = set(edge["conditioning"])
+        required = conditioning | {variable}
+        lower_edges = self.vine.get_trees()[tree_idx - 1]
+
+        for lower_idx, lower_edge in enumerate(lower_edges):
+            lower_set = set(lower_edge["conditioned"]) | set(lower_edge["conditioning"])
+            if lower_set != required:
+                continue
+
+            lower_conditioned = lower_edge["conditioned"]
+            if variable == lower_conditioned[0]:
+                lower_hfunc_idx = 1
+            elif variable == lower_conditioned[1]:
+                lower_hfunc_idx = 0
+            else:
+                continue
+
+            return self.__resolve_independence_hfunc(
+                pdf_full,
+                data,
+                tree_idx - 1,
+                lower_idx,
+                lower_hfunc_idx,
+                sub=sub,
+                resolving=resolving,
+            )
+
+        return None
+
+    def __get_tree_hfuncs(self, pdf_full, data, tree_idx, hfunc_idx, sub=False):
+        """Return stored h-functions, filling independence edges when possible."""
+        values = []
+        for edge_idx in range(len(self.vine.get_trees()[tree_idx])):
+            values.append(self.__resolve_independence_hfunc(
+                pdf_full,
+                data,
+                tree_idx,
+                edge_idx,
+                hfunc_idx,
+                sub=sub,
+            ))
+        return values
+
+    def __get_final_hfunc_input(self, pdf_full, data, tree_idx, variable, sub=False):
+        """Get the penultimate h-function corresponding to a final-edge endpoint."""
+        for edge_idx, edge in enumerate(self.vine.get_trees()[tree_idx]):
+            edge_variables = set(edge["conditioned"]) | set(edge["conditioning"])
+            if variable not in edge_variables:
+                continue
+
+            if edge["conditioned"][0] == variable:
+                hfunc_idx = 1
+            elif edge["conditioned"][1] == variable:
+                hfunc_idx = 0
+            else:
+                continue
+
+            hfunc = self.__resolve_independence_hfunc(
+                pdf_full, data, tree_idx, edge_idx, hfunc_idx, sub=sub
+            )
+            if hfunc is not None and hfunc.size:
+                return hfunc
+
+        return None
 
     def cdf_implicit(self, data):
         '''
@@ -511,15 +637,60 @@ class conditional_vine_copula:
         the last h function of the tree structure as the h functions are conditional cdfs by construction.
         '''
         if len(self.ed_set) == 1:
-            h_evals, _ = self.__eval_h_functions(data)
+            if self.n_discrete>0:
+                pdf_full = self.vine.pdf_full(data)
 
-            if self.trees_np[-1]["conditioned"][0] == self.ed_set:
-                return h_evals[-1][1]
-            elif self.trees_np[-1]["conditioned"][1] == self.ed_set:
-                return h_evals[-1][0]
+                penultimate = len(self.vine.get_trees()) - 2
+
+                final_edge = self.trees_np[-1]
+                final_conditioned = final_edge["conditioned"]
+                u1 = self.__get_final_hfunc_input(
+                    pdf_full, data, penultimate, final_conditioned[0]
+                )
+                u2 = self.__get_final_hfunc_input(
+                    pdf_full, data, penultimate, final_conditioned[1]
+                )
+
+                u1_sub = self.__get_final_hfunc_input(
+                    pdf_full, data, penultimate, final_conditioned[0], sub=True
+                )
+                u2_sub = self.__get_final_hfunc_input(
+                    pdf_full, data, penultimate, final_conditioned[1], sub=True
+                )
+
+                if (u1 is None) or (u2 is None) :
+                    if u1 is None:
+                        print("u1")
+                    if u2 is None:
+                        print("u2")
+                    print(pdf_full)
+                
+
+                if u1_sub is None:
+                    u1_sub = u1
+                if u2_sub is None:
+                    u2_sub = u2
+                final_inputs = np.column_stack((u1, u2, u1_sub, u2_sub))
+
+                if final_conditioned[0] == self.ed_set:
+                    return final_edge["pair_copula"].hfunc2(final_inputs)
+                elif final_conditioned[1] == self.ed_set:
+                    return final_edge["pair_copula"].hfunc1(final_inputs)
+                else:
+                    raise ValueError("The conditioned set implied from the given conditioning set and the vine copula"
+                    " is not in the last copula. The vine is not set up correctly.")
+
+
             else:
-                raise ValueError("The conditioned set implied from the given conditioning set and the vine copula"
-                " is not in the last copula. The vine is not set up correctly.")
+                h_evals, _ = self.__eval_h_functions(data)
+
+                if self.trees_np[-1]["conditioned"][0] == self.ed_set:
+                    return h_evals[-1][1]
+                elif self.trees_np[-1]["conditioned"][1] == self.ed_set:
+                    return h_evals[-1][0]
+                else:
+                    raise ValueError("The conditioned set implied from the given conditioning set and the vine copula"
+                    " is not in the last copula. The vine is not set up correctly.")
 
         else:
             raise NotImplementedError("Not implemented as 2 dimensions requires further structure, and >2D there is no currently known implicit form")
@@ -586,6 +757,8 @@ class conditional_vine_copula:
 
     def inverse_transform():
         pass
+
+
 
 
 def fit_conditional_vines(U_condition, U_target):
@@ -1071,7 +1244,7 @@ def estimate_gaussian_clayton_gas(u_tilde, epochs=500, learning_rate=0.01,
             )
         
         optimizer.zero_grad(set_to_none=True)
-        
+        #Batch episodes over this calculation
         nll =  - gaussian_clayton_mixture_log_likelihood(u_tilde, z, weight,
                                                           f_G_0, omega_G, A_G, B_G,
                                                           f_C_0, omega_C, A_C, B_C,
@@ -1223,7 +1396,7 @@ class time_varying_copula:
         '''
         if type(c_data) != torch.tensor:
             c_data = torch.as_tensor(c_data)
-        R_next = torch.as_tensor(self.R_next, dtype=torch.float64) # do we need these?
+        R_next = torch.as_tensor(self.R_next, dtype=torch.float64) 
         theta_next = torch.as_tensor(self.theta_next, dtype=torch.float64)
         weight = torch.as_tensor(self.weight, dtype=torch.float64)
     

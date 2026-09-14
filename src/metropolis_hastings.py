@@ -104,8 +104,114 @@ def metropolis_hastings(target: function,
     if burn_in is not None:
         chain = chain[burn_in:]
 
-    return chain, accepted/chain_length
+    return chain, accepted/(chain_length-1)
 
+def metropolis_hastings_log(target: function, 
+                            proposal: function, 
+                            random_proposal: function,
+                            initial_position: np.array, 
+                            symmetric_proposal = False,
+                            chain_length = 100, 
+                            burn_in = None, 
+                            gen = np.random.default_rng(),
+                            check_acceptance = False) -> np.array:
+    '''
+    Runs a MH algorithm.
+    '''
+    def get_alpha(x, y):
+        alpha = np.log(target(x))+np.log(proposal(y, x))-np.log(target(y))-np.log(proposal(x, y))
+        return min(0, alpha)
+
+    def get_alpha_symmetric(x, y):
+        alpha = np.log(target(x))-np.log(target(y))
+        if check_acceptance:
+                print(target(x), target(y))
+        return min(0, alpha)
+
+    chain = np.zeros((chain_length, len(initial_position)))
+    chain[0] = initial_position
+    accepted = 0
+    if symmetric_proposal:
+        for i in range(1, chain_length):
+            u = gen.uniform()
+            x_current = chain[i-1]
+            x_dash = random_proposal(x_current) 
+            a = get_alpha_symmetric(x_dash, x_current)
+            #print(a, u)
+            if np.log(u)<a:
+                chain[i] = x_dash
+                accepted += 1
+            else:
+                chain[i] = chain[i-1]
+    else:
+        for i in range(1, chain_length):
+            u = gen.uniform()
+            x_current = chain[i-1]
+            x_dash = random_proposal(x_current) 
+            a = get_alpha(x_dash, x_current)
+            #print(a, u)
+            if np.log(u)<a:
+                chain[i] = x_dash
+                accepted += 1
+            else:
+                chain[i] = chain[i-1]
+
+    if burn_in is not None:
+        chain = chain[burn_in:]
+
+    return chain, accepted/(chain_length-1)
+
+def metropolis_hastings(target: function, 
+                        proposal: function, 
+                        random_proposal: function,
+                        initial_position: np.array, 
+                        symmetric_proposal = False,
+                        chain_length = 100, 
+                        burn_in = None, 
+                        gen = np.random.default_rng()) -> np.array:
+    '''
+    Runs a MH algorithm.
+    '''
+    def get_alpha(x, y):
+        alpha = target(x)*proposal(y, x)/(target(y)*proposal(x, y))
+        return min(1, alpha)
+
+    def get_alpha_symmetric(x, y):
+        alpha = target(x)/target(y)
+        return min(1, alpha)
+
+    chain = np.zeros((chain_length, len(initial_position)))
+    chain[0] = initial_position
+    accepted = 0
+    if symmetric_proposal:
+        for i in range(1, chain_length):
+            u = gen.uniform()
+            x_current = chain[i-1]
+            x_dash = random_proposal(x_current) 
+            a = get_alpha_symmetric(x_dash, x_current)
+            #print(a, u)
+            if u<a:
+                chain[i] = x_dash
+                accepted += 1
+            else:
+                chain[i] = chain[i-1]
+    else:
+        for i in range(1, chain_length):
+            u = gen.uniform()
+            x_current = chain[i-1]
+            x_dash = random_proposal(x_current) 
+            a = get_alpha(x_dash, x_current)
+            #print(a, u)
+            if u<a:
+                chain[i] = x_dash
+                accepted += 1
+            else:
+                chain[i] = chain[i-1]
+
+    if burn_in is not None:
+        chain = chain[burn_in:]
+
+    return chain, accepted/(chain_length-1)
 
 def mvn_def(covariance = None):
     if covariance is None:
