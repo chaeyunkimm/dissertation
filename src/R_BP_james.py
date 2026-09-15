@@ -307,7 +307,7 @@ class rbp_process:
         rhos : Bandwidth parameter
         Us : Trained intermediary RBP CDF evaluations
         '''
-        n, d = self.pivots.shape
+        n, _ = self.pivots.shape
         inverted_data = np.zeros_like(rbp_c_data)
 
         def eq(alpha, v, U):
@@ -316,11 +316,9 @@ class rbp_process:
             return f
 
         for i, c_datum in enumerate(rbp_c_data):
-            print(f"Datum {i}")
-            for j, (rho, current_U) in enumerate(zip(self.rhos, c_datum)):
-                #current_U = current_U[0]
-                inv_datum = np.zeros_like(c_datum)
 
+            inv_datum = np.zeros_like(c_datum)
+            for j, (rho, current_U) in enumerate(zip(self.rhos, c_datum)):
                 # backward recursion
                 for k, pivot in enumerate(reversed(self.pivots)):
                     idx = n-1-k

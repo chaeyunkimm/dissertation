@@ -401,6 +401,8 @@ class conditional_vine_copula:
         self.subtree_mask = self.__find_subtree_mask(self.conditioning_set)
         self.subtrees_np = self.trees_np[self.subtree_mask]
 
+        self.cond_order = np.array(self.vine.order)[-len(self.conditioning_set):]-len(self.ed_set)-1
+
         if check_vine:
             print(self.vine)
 
@@ -757,6 +759,14 @@ class conditional_vine_copula:
 
     def inverse_transform():
         pass
+
+    def conditional_sample(self, cond_data, n_samples=100):
+        #assert cond_data.shape == self.conditioning_set.shape, f"The conditioning data must have the same shape as the conditioning set of the vine. cond_data.shape = {cond_data.shape}, conditioning_set.shape = {self.conditioning_set.shape}"
+        u_cond = np.repeat(cond_data, repeats=n_samples, axis=0)
+
+        u_cond = u_cond[:, self.cond_order]
+
+        return self.vine.simulate_conditional(u_cond)
 
 
 

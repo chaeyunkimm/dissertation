@@ -100,10 +100,9 @@ class cauchy_prior:
         n, _ = data.shape
         p0_grid = np.zeros((n, self.d))
         P0_grid = np.zeros((n, self.d))
-        for loc, scale in zip(self.locs, self.scales):
-            print(loc, scale)
-            p0_grid = cauchy.pdf(data, loc=loc, scale=scale)
-            P0_grid = cauchy.cdf(data, loc=loc, scale=scale)
+        for i, (loc, scale) in enumerate(zip(self.locs, self.scales)):
+            p0_grid[:, i] = cauchy.pdf(data[:, i], loc=loc, scale=scale)
+            P0_grid[:, i] = cauchy.cdf(data[:, i], loc=loc, scale=scale)
 
         return p0_grid, P0_grid
 
@@ -111,9 +110,9 @@ class cauchy_prior:
         n, _ = c_data.shape
         xs = np.zeros((n, self.d))
 
-        for loc, scale in zip(self.locs, self.scales):
+        for i, (loc, scale) in enumerate(zip(self.locs, self.scales)):
 
-            xs = cauchy.ppf(c_data, loc=loc, scale=scale)
+            xs[:, i] = cauchy.ppf(c_data[:, i], loc=loc, scale=scale)
 
         return xs
 
@@ -288,6 +287,38 @@ class obs_transform_pend2:
         new_data = torch.column_stack((angle, trans_obs[:, 2:]))
 
         return new_data
+
+    def inv_transform_mean(self, trans_ob_samples:torch.tensor)->torch.tensor:
+        '''
+        Performs appropriate transformations and means.
+        '''
+        trans_ob_samples = trans_ob_samples*self.stds + self.means
+
+        if trans_ob_samples.dim() == 1:
+            trans_ob_samples.unsqueeze(0)
+
+        r2 = trans_ob_samples[:, 0:2]
+        if r2.dim() == 1:
+            r2.unsqueeze(0)
+
+        sin_angles_r = r2[:, 0]
+        cos_angles_r = r2[:, 1]
+
+        sin_angles = R_to_interval(sin_angles_r, -1.0, 1.0)
+        cos_angles = R_to_interval(cos_angles_r, -1.0, 1.0)
+
+        mean_sin_angle = torch.mean(sin_angles, dim=0)
+        mean_cos_angle = torch.mean(cos_angles, dim=0)
+
+        theta = torch.atan2(mean_sin_angle, mean_cos_angle)
+
+        velocity = torch.mean(trans_ob_samples[:, 2:], dim=0)
+
+        new_data = torch.column_stack((theta, velocity))
+
+        return new_data
+
+        
 
 
 class action_transform_pendulum:
