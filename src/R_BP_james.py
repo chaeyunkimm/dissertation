@@ -273,13 +273,31 @@ def invert_rbp_cdf(data:np.ndarray, rhos:np.ndarray, Us:np.ndarray, P0_inv:funct
     return 0
 
 
-class rbp_process:
-    def __init__(self):
-        pass
 
-    def fit(self, prior_p_data:np.ndarray, prior_c_data:np.ndarray):
+
+class rbp_process:
+    def __init__(self, grid_size = 800, grid_max = 50, grid_type = 'cosine'):
+        '''
+        Initialises the rbp process and grid to evaluate on.
+
+        Assumes input will be standardised.
+        '''
+
+        self.grid_size = grid_size
+        self.grid_max = grid_max
+
+        if grid_type == 'cosine':
+            t = np.linspace(0, 1, num=self.grid_size)
+            self.grid = (1 - np.cos(np.pi * t)) / 2 # Uses cosine decay to place more points near the boundary
+        elif grid_type == 'linear':
+            self.grid = np.linspace(0, 1, num=self.grid_size)
+
+    def fit(self, prior_p_data:np.ndarray, prior_c_data:np.ndarray, ):
         self.prior_p_data, self.prior_c_data = prior_p_data, prior_c_data
         self.rhos, self.pivots = fit_R_BP_marginals(prior_p_data, prior_c_data)
+
+        full_grid = np.repeat(np.expand_dims(self.grid, axis = 1), repeats = len(self.rhos), axis=1)
+        self.cdf_grid = self.cdf(full_grid) # size (len(self.grid), len(self.rhos))
 
     def update_fit(self, new_p_data, new_c_data):
         self.prior_p_data = np.concatenate((self.prior_p_data, new_p_data))
@@ -290,22 +308,45 @@ class rbp_process:
         p, _ = R_BP_density_U(self.rhos, p_data, c_data, self.pivots)
         return p
 
-    def cdf(self, p_data, c_data):
+    def cdf__(self, p_data, c_data):
+        '''
+        Deprecated, evaluates the full recursion, requiring the p_data also.
+        '''
         _, c = R_BP_density_U(self.rhos, p_data, c_data, self.pivots)
         return c
 
+    def cdf(self, c_data):
+        '''
+        Evaluates only the cdf of the rbp process.
+
+        c_data: Prior cdf evaluations on [0,1]
+        '''
+        c = c_data
+        for i, u_i in enumerate(self.pivots):
+                # weight
+                alpha = get_alpha(i+1)
+                u = c
+
+                H_rho = gaussian_conditional_cdf(u, u_i, self.rhos)
+
+                c = (1 - alpha) * c + alpha * H_rho
+        return c 
+
     def eval(self, p_data, c_data):
+        '''
+        Evaluates the full recursion on both the pdf and cdf.
+        '''
         return R_BP_density_U(self.rhos, p_data, c_data, self.pivots)
 
     def inverse_cdf(self, rbp_c_data:np.ndarray)->np.ndarray:
         '''
         Go from 1 evaluation of the RBP CDF back to a value in X.
+
+        Uses Brentq recursively.
     
         Parameters:
         -----------
-        data : Evaluations to be inverted
-        rhos : Bandwidth parameter
-        Us : Trained intermediary RBP CDF evaluations
+        rbp_c_data : Evaluations to be inverted
         '''
         n, _ = self.pivots.shape
         inverted_data = np.zeros_like(rbp_c_data)
@@ -325,10 +366,10 @@ class rbp_process:
 
                     alpha = get_alpha(idx+1)
         
-                    func = eq(alpha, pivot[0], current_U) 
+                    func = eq(alpha, pivot[j], current_U) 
         
                     # finding root : f(U_pre) = 0 
-                    U_prev = brentq(func, 1e-10, 1 - 1e-10)
+                    U_prev = brentq(func, 1e-6, 1 - 1e-6)
         
                     current_U = U_prev
 
@@ -337,6 +378,16 @@ class rbp_process:
             inverted_data[i] = inv_datum
 
         return inverted_data
+
+    def estimate_inverse_cdf(self, rbp_c_data:np.ndarray)->np.ndarray:
+        '''
+        Estimates the inverse cdf of the rbp process using the grid of evaluations
+        '''
+        inverted_c_data = np.zeros_like(rbp_c_data)
+        for i, c_col in enumerate(rbp_c_data.T):
+            inverted_c_data[:, i] = np.interp(c_col, self.cdf_grid[:, i], self.grid)
+
+        return inverted_c_data
 
     def plot_real_line_pdfs(self, x_grid=None, n_points=500):
         """

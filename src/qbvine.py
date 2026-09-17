@@ -216,7 +216,7 @@ class splitdiscrete_qb_conditional_vines:
 
     Has various functions like pdf, cdf to evaluate for data and allow for metropolis hastings.
     '''
-    def __init__(self, dimension = None, rl = True, observation_d = 4, action_d = 1, discrete_action = 1, action_set = None):
+    def __init__(self, dimension = None, rl = True, observation_d = 4, action_d = 1, discrete_action = 1, action_set = None, rbp_grid_size = 5000):
         if rl:
             self.conditioned_set = np.arange(1, observation_d+1)
             self.conditioning_set  = np.arange(observation_d++1, 2*(observation_d)+1) 
@@ -227,7 +227,7 @@ class splitdiscrete_qb_conditional_vines:
         else:
             raise NotImplementedError("The conditioning set construction has not been implemented outside of reinforcement learning")
         self.cond_vines = []
-        self.rbp = rbp_process()
+        self.rbp = rbp_process(grid_size=rbp_grid_size)
         self.prior = cauchy_prior()
         self.observation_d = observation_d
         self.action_d = action_d
@@ -236,7 +236,7 @@ class splitdiscrete_qb_conditional_vines:
                 raise ValueError("An action set must be given for discrete actions")
             self.action_set = action_set
 
-    def fit(self, data, check_vines = False, check_tv = False, episode_ends = None):
+    def fit(self, data, check_vines = False, check_tv = False, episode_ends = None, rbp_max = 2000):
         '''
         Assumes we want to condition on the last state and action, nothing else.
 
@@ -254,7 +254,7 @@ class splitdiscrete_qb_conditional_vines:
 
         self.prior.fit(data[:, :-1])
         p, c = self.prior.eval(data[:,:-1])
-        self.rbp.fit(p, c)
+        self.rbp.fit(p[:rbp_max], c[:rbp_max])
         p, c = self.rbp.eval(p, c)
 
         self.last_state_and_action_postrbp = [c[-1,:]]
@@ -374,7 +374,7 @@ class splitdiscrete_qb_conditional_vines:
 
         u_samples = self.cond_vines[idx].conditional_sample(self.last_state_and_action_postrbp[:,:-1], n_samples = n_samples)
 
-        prior_us = self.rbp.inverse_cdf(u_samples[:, :self.observation_d])
+        prior_us = self.rbp.estimate_inverse_cdf(u_samples[:, :self.observation_d])
 
         xs = self.prior.ppf(prior_us)
 
