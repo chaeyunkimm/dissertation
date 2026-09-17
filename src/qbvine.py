@@ -77,14 +77,6 @@ class qb_conditional_vine:
         self.cond_vine = conditional_vine_copula(conditioning_set=self.conditioning_set, n_discrete=self.discrete_action)
         self.cond_vine.fit_from_data(ts[:, self.mask_set], check_vine=check_vines) #-1?
 
-        # if seperate_prediction:
-            # for i, cond in enumerate(self.conditioned_set):
-            #     mask = np.concatenate(([cond - 1], self.conditioning_set - 1))
-            #     print(mask)
-            #     conditional_vine = conditional_vine_copula(self.vine_cond_set, n_discrete=self.discrete_action)
-            #     conditional_vine.fit_from_data(ts[:, mask], check_vine = check_vines)
-            #     self.cond_vines.append(conditional_vine)
-
 # Below here there be dragons
     def step_forward(self, data, action):
         '''
@@ -216,7 +208,8 @@ class splitdiscrete_qb_conditional_vines:
 
     Has various functions like pdf, cdf to evaluate for data and allow for metropolis hastings.
     '''
-    def __init__(self, dimension = None, rl = True, observation_d = 4, action_d = 1, discrete_action = 1, action_set = None, rbp_grid_size = 5000):
+    def __init__(self, dimension = None, rl = True, observation_d = 4, action_d = 1, 
+                 discrete_action = 1, action_set = None, rbp_grid_size = 5000, max_rho = None):
         if rl:
             self.conditioned_set = np.arange(1, observation_d+1)
             self.conditioning_set  = np.arange(observation_d++1, 2*(observation_d)+1) 
@@ -227,7 +220,7 @@ class splitdiscrete_qb_conditional_vines:
         else:
             raise NotImplementedError("The conditioning set construction has not been implemented outside of reinforcement learning")
         self.cond_vines = []
-        self.rbp = rbp_process(grid_size=rbp_grid_size)
+        self.rbp = rbp_process(grid_size=rbp_grid_size, max_rho=max_rho)
         self.prior = cauchy_prior()
         self.observation_d = observation_d
         self.action_d = action_d
@@ -379,3 +372,66 @@ class splitdiscrete_qb_conditional_vines:
         xs = self.prior.ppf(prior_us)
 
         return xs
+
+
+class pendulum_vines:
+    def __init__(self, rbp_train_max = 500, discrete_action = True, max_rho=None):
+        self.rbp_train_max = rbp_train_max
+        self.discrete = discrete_action
+        self.obs_transformer = obs_transform_pend2(standardise=True)
+        self.max_rho = max_rho
+
+    def fit(self, observations, actions, episode_ends = None):
+        if self.discrete:
+            # Fit transformer 
+            self.obs_transformer.fit(torch.from_numpy(observations))
+            trans_obs = self.obs_transformer.transform(torch.from_numpy(observations)).numpy()
+            trans_data = np.concatenate((trans_obs, actions), axis=1)
+
+            self.qbcondcop = splitdiscrete_qb_conditional_vines(observation_d=3, discrete_action=1, action_set=np.unique(actions), max_rho=self.max_rho)
+            self.qbcondcop.fit(trans_data, check_vines=True, episode_ends=episode_ends)
+
+    def predict_next_state(self, observation, action, transformed = False, num_samples = 50):
+        if transformed:
+            self.qbcondcop.step_forward(np.expand_dims(observation, axis=0), action)
+        else:
+            trans_obs = self.obs_transformer.transform(observation).numpy()
+            self.qbcondcop.step_forward(trans_obs, action)
+
+        preds = self.qbcondcop.sample_next_state(n_samples=num_samples)
+        predicted_next = self.obs_transformer.inv_transform_mean(torch.from_numpy(preds))
+
+        return predicted_next
+
+
+    def simulate_trajectory(self, policy=None, horizon=50):
+        action_space = torch.tensor([-50.0, 0.0, 50.0])
+        n_action = action_space.shape[0]
+    
+        rand_unif_dist1 = torch.distributions.uniform.Uniform(-1e-5, 1e-5)
+        s_history = rand_unif_dist1.sample(torch.Size([horizon,2]))
+        s_dash_history = torch.zeros(horizon, 2)
+        a_history = torch.zeros(horizon, 1)
+        r_history = torch.zeros(horizon, 1)
+    
+        for time in range(horizon):
+            ## random policy
+            idx = torch.randint(0, n_action, (1,))
+            action_now = action_space[idx].item()
+
+            a_history[time] = action_now
+    
+            #training_x = torch.hstack([s_history[time], torch.tensor([action_now], dtype=torch.float32)]).view(1, -1)
+            next_state = self.predict_next_state(torch.unsqueeze(s_history[time],dim=0), action_now, transformed=False)
+            s_dash_history[time, :] = torch.squeeze(next_state)
+    
+            if torch.abs(next_state[0][0]) <= torch.pi / 2:
+                next_reward = 1.0
+                if time < horizon - 1:
+                    s_history[time + 1, :] = s_dash_history[time, :]
+            else:
+                next_reward = 0.0
+                
+            r_history[time] = torch.tensor(next_reward, dtype=torch.float32)
+    
+        return s_history, a_history, s_dash_history, r_history

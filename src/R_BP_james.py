@@ -276,7 +276,7 @@ def invert_rbp_cdf(data:np.ndarray, rhos:np.ndarray, Us:np.ndarray, P0_inv:funct
 
 
 class rbp_process:
-    def __init__(self, grid_size = 800, grid_max = 50, grid_type = 'cosine'):
+    def __init__(self, grid_size = 800, grid_max = 50, grid_type = 'cosine', max_rho = None):
         '''
         Initialises the rbp process and grid to evaluate on.
 
@@ -285,6 +285,7 @@ class rbp_process:
 
         self.grid_size = grid_size
         self.grid_max = grid_max
+        self.max_rho = max_rho
 
         if grid_type == 'cosine':
             t = np.linspace(0, 1, num=self.grid_size)
@@ -295,6 +296,11 @@ class rbp_process:
     def fit(self, prior_p_data:np.ndarray, prior_c_data:np.ndarray, ):
         self.prior_p_data, self.prior_c_data = prior_p_data, prior_c_data
         self.rhos, self.pivots = fit_R_BP_marginals(prior_p_data, prior_c_data)
+
+        if self.max_rho is not None:
+            for i, r in enumerate(self.rhos):
+                if r > self.max_rho:
+                    self.rhos[i] = self.max_rho
 
         full_grid = np.repeat(np.expand_dims(self.grid, axis = 1), repeats = len(self.rhos), axis=1)
         self.cdf_grid = self.cdf(full_grid) # size (len(self.grid), len(self.rhos))
