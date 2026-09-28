@@ -1,10 +1,12 @@
+import time
+
 import numpy as np
 import pyvinecopulib as pv
 import torch
 import matplotlib.pyplot as plt
 
 from src.copula import conditional_vine_copula
-from src.time_varying_vine_copula import SlidingWindowDataset, rbp_process, cauchy_prior, discrete_action_prior
+from src.time_varying_vine_copula import SlidingWindowDataset, rbp_process, cauchy_prior, discrete_action_prior, obs_transform_pend2, obs_transform_pendulum, action_transform_pendulum
 
 class qb_conditional_vine:
     '''
@@ -12,7 +14,7 @@ class qb_conditional_vine:
 
     Has various functions like pdf, cdf to evaluate for data and allow for metropolis hastings.
     '''
-    def __init__(self, dimension = None, rl = True, observation_d = 4, action_d = 1, discrete_action = 0, action_set = None):
+    def __init__(self, dimension = None, rl = True, observation_d = 4, action_d = 1, discrete_action = 0, action_set = None, rbp_grid_size = 5000, max_rho = None):
         if rl:
             self.conditioned_set = np.arange(1, observation_d+1) #correct
             self.conditioning_set  = np.arange(observation_d+1, 2*observation_d+action_d+1) #incorrect
@@ -23,10 +25,12 @@ class qb_conditional_vine:
         else:
             raise NotImplementedError("The conditioning set construction has not been implemented outside of reinforcement learning")
         self.cond_vines = []
-        self.rbp = rbp_process()
+        self.rbp = rbp_process(grid_size=rbp_grid_size, max_rho=max_rho)
         self.prior = cauchy_prior()
         self.observation_d = observation_d
         self.action_d = action_d
+        if max_rho is not None:
+            self.max_rho = max_rho
         if self.discrete_action > 0:
             if action_set is None:
                 raise ValueError("An action set must be given for discrete actions")
@@ -169,12 +173,6 @@ class qb_conditional_vine:
         ts = np.expand_dims(np.concatenate((c, self.last_state_and_action_postrbp), axis = None), 0)
 
         cond_vine_pdf = self.cond_vine.pdf(ts[:, self.mask_set])
-        
-        #This is not required for this model yet
-        # for i, cond in enumerate(self.conditioned_set):
-        #     mask = np.concatenate(([cond - 1], self.conditioning_set - 1))
-        #     cond_vine_pdfs[:,i] = self.cond_vines[i].pdf(ts[:, mask])
-        #     cond_vine_cdfs[:,i] = self.cond_vines[i].cdf_implicit(ts[:, mask])
 
         #Need to check if this is multiplying by the action rbp as well
         if self.discrete_action>0:
@@ -200,6 +198,19 @@ class qb_conditional_vine:
         xs = self.prior.ppf(prior_us)
         return xs
 
+    def sample_next_state(self, state_and_action = None, n_samples = 20):
+        '''
+        Predicts the next state given the previous state and an action using monte carlo estimation via conditional sampling
+        and inversion of the rbp process.
+        '''
+
+        u_samples = self.cond_vine.conditional_sample(self.last_state_and_action_postrbp, n_samples = n_samples)
+
+        prior_us = self.rbp.estimate_inverse_cdf(u_samples[:, :self.observation_d])
+
+        xs = self.prior.ppf(prior_us)
+
+        return xs
 
 
 class splitdiscrete_qb_conditional_vines:
@@ -215,7 +226,7 @@ class splitdiscrete_qb_conditional_vines:
             self.conditioning_set  = np.arange(observation_d++1, 2*(observation_d)+1) 
             self.mask_set = np.concatenate((self.conditioned_set, np.arange(observation_d+action_d+1, 2*(observation_d)+action_d+1)))
             self.discrete_action = discrete_action
-            print(self.conditioning_set, self.conditioned_set, self.mask_set)
+
 
         else:
             raise NotImplementedError("The conditioning set construction has not been implemented outside of reinforcement learning")
@@ -252,7 +263,7 @@ class splitdiscrete_qb_conditional_vines:
 
         self.last_state_and_action_postrbp = [c[-1,:]]
         c = np.hstack((c, np.expand_dims(data[:,-1], axis=1)))
-        print("c after hstack", c.shape)
+        print("Number of data points", c.shape[0])
 
         time_series = torch.from_numpy(c)
         sliding_dataset = SlidingWindowDataset(time_series, window_size = 1)
@@ -262,8 +273,6 @@ class splitdiscrete_qb_conditional_vines:
 
         for act in self.action_set:
             tstemp = ts[ts[:, -1]==act]
-            print("tstemp",tstemp.shape)
-            print(self.mask_set)
 
             cond_vine = conditional_vine_copula(conditioning_set=self.conditioning_set, n_discrete=0)
             cond_vine.fit_from_data(tstemp[:, self.mask_set-1], check_vine=check_vines)
@@ -378,30 +387,58 @@ class pendulum_vines:
     def __init__(self, rbp_train_max = 500, discrete_action = True, max_rho=None):
         self.rbp_train_max = rbp_train_max
         self.discrete = discrete_action
-        self.obs_transformer = obs_transform_pend2(standardise=True)
+        if self.discrete:
+            self.obs_transformer = obs_transform_pend2(standardise=True)
+        else:
+            self.obs_transformer = obs_transform_pendulum(standardise=True)
+            self.act_transformer = action_transform_pendulum(standardise=True)
         self.max_rho = max_rho
 
-    def fit(self, observations, actions, episode_ends = None):
+    def fit(self, observations, actions, episode_ends = None, check_vines = False):
+        # Fit transformer
+        self.obs_transformer.fit(torch.from_numpy(observations))
+        trans_obs = self.obs_transformer.transform(torch.from_numpy(observations)).numpy()
         if self.discrete:
-            # Fit transformer 
-            self.obs_transformer.fit(torch.from_numpy(observations))
-            trans_obs = self.obs_transformer.transform(torch.from_numpy(observations)).numpy()
             trans_data = np.concatenate((trans_obs, actions), axis=1)
 
             self.qbcondcop = splitdiscrete_qb_conditional_vines(observation_d=3, discrete_action=1, action_set=np.unique(actions), max_rho=self.max_rho)
-            self.qbcondcop.fit(trans_data, check_vines=True, episode_ends=episode_ends)
+            self.qbcondcop.fit(trans_data, check_vines=check_vines, episode_ends=episode_ends)
+        else:
+            self.act_transformer.fit(actions)
+            trans_acts = self.act_transformer.transform(actions)
 
-    def predict_next_state(self, observation, action, transformed = False, num_samples = 50):
+            trans_data = np.concatenate((trans_obs, trans_acts), axis = 1)
+
+            self.qbcondcop = qb_conditional_vine(observation_d=5, action_d=1, discrete_action=0, max_rho = self.max_rho)
+            self.qbcondcop.fit(trans_data, check_vines=check_vines)
+
+    def predict_next_state(self, observation, action, transformed = False, median = True, errors = False, num_samples = 50):
         if transformed:
             self.qbcondcop.step_forward(np.expand_dims(observation, axis=0), action)
         else:
             trans_obs = self.obs_transformer.transform(observation).numpy()
+            if not self.discrete:
+                action = self.act_transformer.transform(action)
             self.qbcondcop.step_forward(trans_obs, action)
 
         preds = self.qbcondcop.sample_next_state(n_samples=num_samples)
-        predicted_next = self.obs_transformer.inv_transform_mean(torch.from_numpy(preds))
 
-        return predicted_next
+        if errors:
+            if median:
+                predicted_next, pred05, pred95 = self.obs_transformer.inv_transform_median(torch.from_numpy(preds), errors=errors)
+            else:
+                raise ValueError("For errors, you must use the median estimation")
+
+            return predicted_next, pred05, pred95
+        else:
+            if median:
+                predicted_next = self.obs_transformer.inv_transform_median(torch.from_numpy(preds))
+            else:
+                predicted_next = self.obs_transformer.inv_transform_mean(torch.from_numpy(preds))
+
+            return predicted_next
+
+
 
 
     def simulate_trajectory(self, policy=None, horizon=50):
@@ -413,6 +450,11 @@ class pendulum_vines:
         s_dash_history = torch.zeros(horizon, 2)
         a_history = torch.zeros(horizon, 1)
         r_history = torch.zeros(horizon, 1)
+
+        if self.discrete:
+            target = torch.pi /2
+        else:
+            target = 0.2
     
         for time in range(horizon):
             ## random policy
@@ -425,7 +467,7 @@ class pendulum_vines:
             next_state = self.predict_next_state(torch.unsqueeze(s_history[time],dim=0), action_now, transformed=False)
             s_dash_history[time, :] = torch.squeeze(next_state)
     
-            if torch.abs(next_state[0][0]) <= torch.pi / 2:
+            if torch.abs(next_state[0][0]) <= target:
                 next_reward = 1.0
                 if time < horizon - 1:
                     s_history[time + 1, :] = s_dash_history[time, :]
@@ -435,3 +477,17 @@ class pendulum_vines:
             r_history[time] = torch.tensor(next_reward, dtype=torch.float32)
     
         return s_history, a_history, s_dash_history, r_history
+
+
+class pendulum_continuous_vine:
+    def __init__(self):
+        pass
+
+    def fit(self, observations, actions):
+        pass
+
+    def predict_next_state(self):
+        pass
+
+    def simulate_trajectory(self):
+        pass

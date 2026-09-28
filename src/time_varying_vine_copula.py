@@ -93,8 +93,9 @@ class cauchy_prior:
             loc, scale = cauchy.fit(observations[:, i])
             self.locs.append(loc)
             self.scales.append(scale)
-        print(f"Cauchy Locs = {self.locs}")
-        print(f"Scales = {self.scales}")
+        if check:
+            print(f"Cauchy Locs = {self.locs}")
+            print(f"Scales = {self.scales}")
 
     def eval(self, data):
         n, _ = data.shape
@@ -242,6 +243,38 @@ class obs_transform_pendulum:
 
         return new_data
 
+    def inv_transform_mean(self, trans_ob_samples:torch.tensor)->torch.tensor:
+        '''
+        Performs appropriate transformations and means.
+        '''
+        trans_ob_samples = trans_ob_samples*self.stds + self.means
+
+        if trans_ob_samples.dim() == 1:
+            trans_ob_samples.unsqueeze(0)
+
+        r2 = trans_ob_samples[:, 1:3]
+        if r2.dim() == 1:
+            r2.unsqueeze(0)
+
+        sin_angles_r = r2[:, 0]
+        cos_angles_r = r2[:, 1]
+
+        sin_angles = R_to_interval(sin_angles_r, -1.0, 1.0)
+        cos_angles = R_to_interval(cos_angles_r, -1.0, 1.0)
+
+        mean_sin_angle = torch.mean(sin_angles, dim=0)
+        mean_cos_angle = torch.mean(cos_angles, dim=0)
+
+        theta = torch.atan2(mean_sin_angle, mean_cos_angle)
+
+        position = torch.mean(trans_ob_samples[:, 0], dim=0)
+
+        velocity = torch.mean(trans_ob_samples[:, 2:], dim=0)
+
+        new_data = torch.column_stack((position, theta, velocity))
+
+        return new_data
+
 class obs_transform_pend2:
     def __init__(self, standardise = True):
         self.means = None
@@ -318,7 +351,54 @@ class obs_transform_pend2:
 
         return new_data
 
+    def inv_transform_median(self, trans_ob_samples:torch.tensor, errors = False)->torch.tensor:
+        '''
+        Performs appropriate transformations and median, quantile calculations.
+        '''
+        trans_ob_samples = trans_ob_samples*self.stds + self.means
+
+        if trans_ob_samples.dim() == 1:
+            trans_ob_samples.unsqueeze(0)
+
+        r2 = trans_ob_samples[:, 0:2]
+        if r2.dim() == 1:
+            r2.unsqueeze(0)
+
+        sin_angles_r = r2[:, 0]
+        cos_angles_r = r2[:, 1]
+
+        sin_angles = R_to_interval(sin_angles_r, -1.0, 1.0)
+        cos_angles = R_to_interval(cos_angles_r, -1.0, 1.0)
+
+        median_sin_angle = torch.quantile(sin_angles, 0.5,dim=0)
+        median_cos_angle = torch.quantile(cos_angles, 0.5, dim=0)
         
+        theta = torch.atan2(median_sin_angle, median_cos_angle)
+
+        velocity = torch.quantile(trans_ob_samples[:, 2:], 0.5, dim=0)
+
+        new_data = torch.column_stack((theta, velocity))
+
+        if errors:
+            percentile95_sin_angle = torch.quantile(sin_angles, 0.95,dim=0)
+            percentile95_cos_angle = torch.quantile(cos_angles, 0.95, dim=0)
+
+            percentile5_sin_angle = torch.quantile(sin_angles, 0.05,dim=0)
+            percentile5_cos_angle = torch.quantile(cos_angles, 0.05, dim=0)
+
+            theta95 = torch.atan2(percentile95_sin_angle, percentile95_cos_angle)
+            theta5 = torch.atan2(percentile5_sin_angle, percentile5_cos_angle)
+
+            velocity95 = torch.quantile(trans_ob_samples[:, 2:], 0.95, dim=0)
+            velocity5 = torch.quantile(trans_ob_samples[:, 2:], 0.05, dim=0)
+
+            new_data95 = torch.column_stack((theta95, velocity95))
+            new_data5 = torch.column_stack((theta5, velocity5))
+
+            return new_data, new_data5, new_data95
+
+        else:
+            return new_data   
 
 
 class action_transform_pendulum:

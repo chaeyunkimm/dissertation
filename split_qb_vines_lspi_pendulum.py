@@ -44,7 +44,7 @@ def append_episode_terminals(states, actions, next_states, rewards):
 
 def minsr_lspi_misspecified_pend(seed_env):
 
-    n_episodes, sim_len, n_eval, n_stop_modelupdate = 10, 1000, 5, 25
+    n_episodes, sim_len, n_eval, n_stop_modelupdate = 50, 1000, 5, 50
     n_sim_sr, h_units, active, adamlr, n_epoch_adam = 10, [10, 10, 10], "swish", 0.001, 500
     print(f"seed {seed_env} pendulum starting")
     print("n_sim_sr, h_units, active, adamlr", n_sim_sr, h_units, active, adamlr)
@@ -62,7 +62,7 @@ def minsr_lspi_misspecified_pend(seed_env):
     old_policy = my_lspi.random_policy
 
     # Declaring the initial variables Need to make this work with my setup.
-    training_data = np.load(f"pend_data/epi1000/epis_{seed_env}.npz")
+    training_data = np.load(f"dissertation\pend_data\epi1000\epis_{seed_env}.npz")
     np_s, np_a, np_s1, np_r = training_data['state'], training_data['action'], training_data['nstate'], training_data['reward']
 
 
@@ -122,9 +122,76 @@ def minsr_lspi_misspecified_pend(seed_env):
             old_policy = new_policy
 
     plt.plot(all_returns_epi)
-    plt.savefig("see_the_line")
+    plt.xlabel("Episode")
+    plt.ylabel("Mean Return")
+
+    plt.savefig("plots_rl/see_the_line_50_learning_episodes_nomaxrho")
     print(f'seed {seed_env} smc minsr lspi finished!!!')
 
     return seed_env
 
-result = minsr_lspi_misspecified_pend(8)
+def test_model_sufficiency(seed_env):
+    n_episodes, sim_len, n_eval, n_stop_modelupdate = 50, 1000, 5, 70
+    n_sim_sr, h_units, active, adamlr, n_epoch_adam = 10, [10, 10, 10], "swish", 0.001, 500
+    print(f"seed {seed_env} pendulum starting")
+    print("n_sim_sr, h_units, active, adamlr", n_sim_sr, h_units, active, adamlr)
+    print("seed_env, n_episodes, sim_len, n_eval", seed_env, n_episodes, sim_len, n_eval)
+    torch.manual_seed(1)
+    np.random.seed(1)
+
+    true_param = np.array([9.8, 2.0, 8.0, 0.5,10.0, 0.1])
+    true_pendulum = pendulum(true_param)
+    # action_space = true_pendulum.action_space
+    my_lspi = LSPI(true_pendulum, sim_len, None)
+
+    ### to keep a record of all the learnt w(policy), episodic return
+    all_w, all_returns_epi, all_discreturns_epi = [], [], []
+    old_policy = my_lspi.random_policy
+
+    # Declaring the initial variables Need to make this work with my setup.
+    training_data = np.load(f"dissertation\pend_data\epi1000\epis_{seed_env}.npz")
+    np_s, np_a, np_s1, np_r = training_data['state'], training_data['action'], training_data['nstate'], training_data['reward']
+
+
+    all_s, all_a, episode_ends = append_episode_terminals(np_s, np_a, np_s1, np_r)
+    raw_episode_ends = np.flatnonzero(np.asarray(np_r).reshape(-1) == 0)
+    epi_ends = episode_ends[:-1]
+    print("Data Loaded")
+    model_stop = epi_ends[n_stop_modelupdate] + 1
+    # Initialize the qbvine model
+    qbvines = pendulum_vines(max_rho=0.95)
+    print("Fitting model")
+    qbvines.fit(all_s[:model_stop], all_a[:model_stop], episode_ends=epi_ends[:n_stop_modelupdate])
+    
+    # The last appended row is a terminal state, not a transition to fit.
+
+    print("Starting Run")
+    for ind_episode in range(n_episodes): 
+        ### calculate episodic return
+        all_returns, disc_returns = [], []
+        init_state = np.random.uniform(low=-1e-10, high=1e-10, size=2)
+        for i in range(n_eval):
+            eval_s, eval_a, eval_s2, eval_r = true_pendulum.simulate_episode(first_state=init_state, policy=old_policy)
+            discounts = np.array(my_lspi.gamma**np.arange(len(eval_r)))
+            discounted_return = discounts.T @ np.array(eval_r)
+            all_returns.append(np.sum(eval_r)), disc_returns.append(discounted_return[0])
+        print(f"Episode {ind_episode} return: {np.mean(all_returns)}")
+        all_returns_epi.append(np.mean(all_returns)), all_discreturns_epi.append(disc_returns)
+        # np.savez(f'pend_misp/minsr_lspi/lspi{seed_env}ret_all1000.npz' ,all_returns_epi = all_returns_epi, n_episodes = n_episodes, all_discreturns_epi=all_discreturns_epi)
+    
+
+
+        sim_s, sim_a, sim_s1, sim_r = qbvines.simulate_trajectory(horizon=sim_len)
+        np_sim_s, np_sim_a, np_sim_s1, np_sim_r = sim_s.detach().numpy(), sim_a.detach().numpy(), sim_s1.detach().numpy(), sim_r.detach().numpy()
+
+        my_lspi.simple_lspi(np_sim_s, np_sim_a, np_sim_s1, np_sim_r)
+        new_policy = lambda x: my_lspi.calc_policy(x, my_lspi.w)
+
+        old_policy = new_policy
+
+    plt.plot(all_returns_epi)
+    plt.savefig("plots_rl/see_the_line_sufficiency_test")
+
+    return seed_env
+
+result = minsr_lspi_misspecified_pend(1)

@@ -765,6 +765,12 @@ class conditional_vine_copula:
         u_cond = np.repeat(cond_data, repeats=n_samples, axis=0)
 
         u_cond = u_cond[:, self.cond_order]
+        if np.any(u_cond==0):
+            print("0 value sampled")
+        elif np.any(u_cond == 1):
+            print("1 value sampled")
+        
+        u_cond = np.clip(u_cond, 1e-8, 1 - 1e-8)
 
         return self.vine.simulate_conditional(u_cond)
 

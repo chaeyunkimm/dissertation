@@ -321,22 +321,35 @@ class rbp_process:
         _, c = R_BP_density_U(self.rhos, p_data, c_data, self.pivots)
         return c
 
-    def cdf(self, c_data):
+    def cdf(self, c_data, dimension = None):
         '''
         Evaluates only the cdf of the rbp process.
 
         c_data: Prior cdf evaluations on [0,1]
         '''
-        c = c_data
-        for i, u_i in enumerate(self.pivots):
-                # weight
-                alpha = get_alpha(i+1)
-                u = c
+        if dimension is None:
+            c = c_data
+            for i, u_i in enumerate(self.pivots):
+                    # weight
+                    alpha = get_alpha(i+1)
+                    u = c
 
-                H_rho = gaussian_conditional_cdf(u, u_i, self.rhos)
+                    H_rho = gaussian_conditional_cdf(u, u_i, self.rhos)
 
-                c = (1 - alpha) * c + alpha * H_rho
-        return c 
+                    c = (1 - alpha) * c + alpha * H_rho
+            return c
+        else:
+            c = c_data
+            for i, u_i in enumerate(self.pivots):
+                    # weight
+                    alpha = get_alpha(i+1)
+                    u = c
+
+                    H_rho = gaussian_conditional_cdf(u, u_i[dimension], self.rhos[dimension])
+
+                    c = (1 - alpha) * c + alpha * H_rho
+            return c
+
 
     def eval(self, p_data, c_data):
         '''
@@ -394,6 +407,27 @@ class rbp_process:
             inverted_c_data[:, i] = np.interp(c_col, self.cdf_grid[:, i], self.grid)
 
         return inverted_c_data
+
+    def test_inverse(self, rbp_c_data:np.ndarray)->np.ndarray:
+
+        inverted_data = np.zeros_like(rbp_c_data)
+
+        def root(u, dim):
+            def func(x):
+                return self.cdf(x, dimension = dim)-u
+            return func
+
+        inv_datum = np.zeros_like(self.rhos)
+
+        for i, c_datum in enumerate(rbp_c_data):
+
+            for j, (rho, current_U) in enumerate(zip(self.rhos, c_datum)):
+                print(current_U.shape)
+                inv_datum[j] = brentq(root(current_U, j), 1e-6, 1 - 1e-6)
+
+            inverted_data[i] = inv_datum
+
+        return inverted_data
 
     def plot_real_line_pdfs(self, x_grid=None, n_points=500):
         """
